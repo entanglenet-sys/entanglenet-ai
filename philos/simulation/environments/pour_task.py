@@ -186,8 +186,29 @@ class PourTaskEnv(IsaacSimEnv):
         """Update stub state for testing."""
         # Simple kinematics update
         self._stub_base_pos[:2] += action[:2] * 0.02
-        self._stub_joint_pos += action[3:9] * 0.02 if len(action) >= 9 else 0.0
-        # Simulate some pouring progress
-        if self._grasped and self._stub_ee_pos[2] > 0.7:
-            self._poured_volume += 2.0  # ml per step
-            self._spilled_volume += 0.05  # small spill per step
+        if len(action) >= 9:
+            self._stub_joint_pos += action[3:9] * 0.02
+
+        # Update end-effector position from joint angles (simplified FK)
+        # Approximate: EE x,y from shoulder+elbow, z from base height + joints
+        j = self._stub_joint_pos
+        reach = 0.4  # arm reach
+        self._stub_ee_pos[0] = self._stub_base_pos[0] + reach * np.cos(j[0]) * np.cos(j[1])
+        self._stub_ee_pos[1] = self._stub_base_pos[1] + reach * np.sin(j[0]) * np.cos(j[1])
+        self._stub_ee_pos[2] = 0.3 + reach * np.sin(j[1]) + 0.2 * np.sin(j[2])
+
+        # Gripper control — action[9] > 0.3 means close/grasp
+        gripper_cmd = action[9] if len(action) > 9 else 0.0
+        if gripper_cmd > 0.3:
+            self._grasped = True
+
+        # Simulate pouring progress when grasped and EE is elevated
+        if self._grasped and self._stub_ee_pos[2] > 0.5:
+            pour_rate = 3.0 * min(1.0, (self._stub_ee_pos[2] - 0.5) * 4)
+            self._poured_volume += pour_rate  # ml per step
+            self._spilled_volume += 0.08  # small spill per step
+        # Cap volumes
+        remaining = self._task_config.source_volume_ml - self._poured_volume - self._spilled_volume
+        if remaining < 0:
+            self._poured_volume = min(self._poured_volume, self._task_config.source_volume_ml * 0.95)
+            self._spilled_volume = min(self._spilled_volume, self._task_config.source_volume_ml * 0.05)

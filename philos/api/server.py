@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
+import numpy as np
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from philos.api.schemas import (
     BenchmarkResult,
@@ -57,16 +61,161 @@ _state_store: dict[str, Any] = {
 }
 
 _ws_clients: list[WebSocket] = []
+_sim_task: asyncio.Task | None = None
+_sim_running: bool = False
+
+
+# ─── Simulation Loop ─────────────────────────────────────────────────────────────
+
+async def _run_simulation_loop() -> None:
+    """Background coroutine: steps the real PourTaskEnv + WholeBodyPolicy,
+    broadcasts state to all WebSocket clients at ~20Hz."""
+    global _sim_running
+
+    try:
+        from philos.simulation.environments.pour_task import PourTaskEnv, PourTaskConfig
+        from philos.learning.policies.whole_body import WholeBodyPolicy
+        from philos.control.safety_shield import SafetyShield
+
+        cfg = PourTaskConfig(max_episode_steps=500)
+        env = PourTaskEnv(config=cfg)
+
+        # Build a policy and initialise on CPU
+        try:
+            import torch
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+
+        policy = WholeBodyPolicy(
+            state_dim=cfg.obs_dim - 18,
+            context_dim=18,
+            action_dim=cfg.action_dim,
+            hidden_dims=[256, 128],
+            device=device,
+        )
+        policy.initialize()
+        safety = SafetyShield()
+        logger.info(f"Simulation loop ready (device={device})")
+
+        episode = 0
+        _sim_running = True
+        while _sim_running:
+            obs, _ = env.reset()
+            safety.reset()
+            episode += 1
+            step = 0
+            ep_reward = 0.0
+            done = False
+
+            await _broadcast_telemetry({
+                "type": "sim_episode_start",
+                "episode": episode,
+            })
+
+            while not done and _sim_running:
+                # Policy inference
+                action, log_prob, value = policy.predict_with_value(obs)
+
+                # Safety filter
+                from philos.core.state import RobotState, JointState, AMRState, EndEffectorState
+                robot_state = RobotState(
+                    amr=AMRState(position=np.array(env._stub_base_pos, dtype=np.float32)),
+                    joints=[JointState(name=f"j{i}", position=float(env._stub_joint_pos[i]))
+                            for i in range(6)],
+                    end_effector=EndEffectorState(
+                        position=np.array(env._stub_ee_pos, dtype=np.float32),
+                        gripper_state=float(np.clip(action[9], 0, 1)) if len(action) > 9 else 0.0,
+                    ),
+                )
+                safe_cmd = safety.compute(action, robot_state)
+                # Reconstruct action array from the safe command
+                safe_action = np.concatenate([
+                    safe_cmd.base_velocity,
+                    safe_cmd.joint_positions,
+                    np.array([safe_cmd.gripper_position]),
+                ])
+
+                # Step env
+                next_obs, reward, terminated, truncated, info = env.step(safe_action)
+                done = terminated or truncated
+                ep_reward += reward
+                step += 1
+
+                # Build telemetry payload with REAL data
+                joint_positions = env._stub_joint_pos.tolist()
+                ee_pos = env._stub_ee_pos.tolist()
+                base_pos = env._stub_base_pos.tolist()
+                poured_frac = env._poured_volume / cfg.source_volume_ml
+                spill_frac = env._spilled_volume / cfg.source_volume_ml
+
+                telem = {
+                    "type": "sim_step",
+                    "episode": episode,
+                    "step": step,
+                    "joints": joint_positions,
+                    "ee_pos": ee_pos,
+                    "base_pos": base_pos,
+                    "gripper": safe_cmd.gripper_position,
+                    "action": safe_action[:10].tolist(),
+                    "reward": round(float(reward), 3),
+                    "ep_reward": round(ep_reward, 2),
+                    "poured_frac": round(poured_frac, 4),
+                    "spill_frac": round(spill_frac, 4),
+                    "value": round(float(value), 3),
+                    "done": done,
+                    "safety_ok": safe_cmd.is_safe,
+                }
+                await _broadcast_telemetry(telem)
+
+                obs = next_obs
+
+                # ~20 Hz — yield to event loop
+                await asyncio.sleep(0.05)
+
+            # Episode end
+            await _broadcast_telemetry({
+                "type": "sim_episode_end",
+                "episode": episode,
+                "total_reward": round(ep_reward, 2),
+                "steps": step,
+                "poured_frac": round(env._poured_volume / cfg.source_volume_ml, 4),
+                "spill_frac": round(env._spilled_volume / cfg.source_volume_ml, 4),
+            })
+
+            # Brief pause between episodes
+            await asyncio.sleep(1.0)
+
+    except asyncio.CancelledError:
+        logger.info("Simulation loop cancelled.")
+    except Exception:
+        logger.exception("Simulation loop crashed!")
+    finally:
+        env.close()
+        _sim_running = False
+        logger.info("Simulation loop stopped.")
 
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application startup/shutdown."""
+    """Application startup/shutdown — auto-starts simulation loop."""
+    global _sim_task
     logger.info("PHILOS API Server starting...")
     _state_store["start_time"] = time.time()
+    # Auto-start simulation in background
+    _sim_task = asyncio.create_task(_run_simulation_loop())
     yield
+    # Shutdown
+    global _sim_running
+    _sim_running = False
+    if _sim_task:
+        _sim_task.cancel()
+        try:
+            await _sim_task
+        except asyncio.CancelledError:
+            pass
     logger.info("PHILOS API Server shutting down.")
 
 
@@ -89,6 +238,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─── Root / Dashboard ───────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def root() -> HTMLResponse:
+    """Interactive PHILOS dashboard with live architecture, robot arm simulation, and telemetry."""
+    from pathlib import Path
+
+    html_path = Path(__file__).parent / "dashboard.html"
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 
 # ─── Language Command Endpoint ───────────────────────────────────────────────────
@@ -279,11 +439,45 @@ async def telemetry_ws(websocket: WebSocket) -> None:
     _ws_clients.append(websocket)
     try:
         while True:
-            # Keep alive — clients can also send commands through WS
             data = await websocket.receive_text()
             logger.debug(f"WS received: {data}")
     except WebSocketDisconnect:
         _ws_clients.remove(websocket)
+
+
+# ─── Simulation Control ─────────────────────────────────────────────────────────
+
+@app.post("/api/v1/simulation/start")
+async def start_simulation() -> dict:
+    """Start the background simulation loop (PourTaskEnv + WholeBodyPolicy)."""
+    global _sim_task, _sim_running
+    if _sim_running:
+        return {"status": "already_running"}
+    _sim_task = asyncio.create_task(_run_simulation_loop())
+    return {"status": "started"}
+
+
+@app.post("/api/v1/simulation/stop")
+async def stop_simulation() -> dict:
+    """Stop the background simulation loop."""
+    global _sim_running, _sim_task
+    if not _sim_running:
+        return {"status": "not_running"}
+    _sim_running = False
+    if _sim_task:
+        _sim_task.cancel()
+        try:
+            await _sim_task
+        except asyncio.CancelledError:
+            pass
+        _sim_task = None
+    return {"status": "stopped"}
+
+
+@app.get("/api/v1/simulation/status")
+async def simulation_status() -> dict:
+    """Check if the background simulation loop is running."""
+    return {"running": _sim_running}
 
 
 async def _broadcast_telemetry(message: dict) -> None:

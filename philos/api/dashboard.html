@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PHILOS — Physical Intelligence Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0e17; --bg2: #111827; --bg3: #1a2235;
+    --accent: #00e5ff; --accent2: #7c4dff; --accent3: #00e676;
+    --warn: #ff9100; --danger: #ff1744;
+    --text: #e0e6ed; --text2: #8892a4;
+    --border: #1e293b;
+    --glow: 0 0 20px rgba(0,229,255,0.15);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }
+
+  .stars { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+  .stars canvas { width: 100%; height: 100%; }
+
+  header { position: relative; z-index: 2; text-align: center; padding: 32px 20px 16px; }
+  header h1 { font-size: 2.6rem; font-weight: 300; letter-spacing: 0.25em; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  header .subtitle { color: var(--text2); font-size: 0.95rem; margin-top: 4px; letter-spacing: 0.15em; }
+  header .version { display: inline-block; margin-top: 8px; padding: 3px 14px; border: 1px solid var(--accent); border-radius: 20px; font-size: 0.72rem; color: var(--accent); letter-spacing: 0.1em; }
+  .conn-badge { display: inline-block; margin-left: 12px; padding: 3px 12px; border-radius: 20px; font-size: 0.72rem; letter-spacing: 0.1em; transition: all 0.3s; }
+  .conn-badge.connected { border: 1px solid var(--accent3); color: var(--accent3); }
+  .conn-badge.disconnected { border: 1px solid var(--danger); color: var(--danger); }
+
+  .container { position: relative; z-index: 2; max-width: 1440px; margin: 0 auto; padding: 16px 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: var(--glow); transition: border-color 0.3s; }
+  .card:hover { border-color: var(--accent); }
+  .card h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.15em; color: var(--accent); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent3); animation: pulse 2s infinite; }
+  .card h2 .dot.off { background: #455a64; animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .arch-card { grid-column: 1 / -1; }
+  .arch-svg { width: 100%; max-height: 300px; }
+  .arch-svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
+  .arch-svg .node { cursor: pointer; transition: filter 0.3s; }
+  .arch-svg .node:hover { filter: brightness(1.3) drop-shadow(0 0 8px rgba(0,229,255,0.5)); }
+  .flow-line { stroke-dasharray: 8 4; animation: dash 1.5s linear infinite; }
+  @keyframes dash { to { stroke-dashoffset: -24; } }
+
+  #armCanvas { width: 100%; height: 320px; border-radius: 8px; background: radial-gradient(ellipse at center bottom, #0d1520 0%, #080c14 100%); }
+
+  .sim-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  .stat { text-align: center; padding: 10px 6px; background: var(--bg3); border-radius: 8px; }
+  .stat .val { font-size: 1.3rem; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--accent3)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .stat .val.warn { background: linear-gradient(135deg, var(--warn), var(--danger)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .stat .lbl { font-size: 0.65rem; color: var(--text2); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 3px; }
+
+  .progress-bar { height: 6px; background: var(--bg3); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .progress-bar .fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+  .progress-bar .fill.pour { background: linear-gradient(90deg, var(--accent2), var(--accent)); }
+  .progress-bar .fill.spill { background: linear-gradient(90deg, var(--warn), var(--danger)); }
+  .progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text2); margin-top: 4px; }
+
+  .modules { display: flex; flex-wrap: wrap; gap: 8px; }
+  .module-badge { display: flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 8px; background: var(--bg3); border: 1px solid var(--border); font-size: 0.82rem; }
+  .module-badge .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .module-badge .status-dot.running { background: var(--accent3); box-shadow: 0 0 6px var(--accent3); }
+  .module-badge .status-dot.ready { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .module-badge .status-dot.offline { background: #455a64; }
+  .module-badge .status-dot.error { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+  .uptime { color: var(--text2); font-size: 0.78rem; margin-top: 10px; }
+
+  .cmd-row { display: flex; gap: 10px; }
+  .cmd-input { flex: 1; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg3); color: var(--text); font-size: 0.92rem; outline: none; transition: border-color 0.3s; }
+  .cmd-input:focus { border-color: var(--accent); }
+  .cmd-btn { padding: 11px 22px; border: none; border-radius: 8px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-weight: 600; cursor: pointer; font-size: 0.88rem; transition: transform 0.1s, box-shadow 0.3s; white-space: nowrap; }
+  .cmd-btn:hover { transform: scale(1.03); box-shadow: 0 0 20px rgba(0,229,255,0.3); }
+  .cmd-btn:active { transform: scale(0.97); }
+  .cmd-response { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--bg3); border-left: 3px solid var(--accent2); font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82rem; white-space: pre-wrap; color: var(--text2); min-height: 36px; max-height: 120px; overflow-y: auto; }
+  .cmd-response.success { border-left-color: var(--accent3); }
+  .cmd-response.error { border-left-color: var(--danger); }
+
+  .telemetry-feed { height: 180px; overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.78rem; background: var(--bg); border-radius: 8px; padding: 10px; border: 1px solid var(--border); }
+  .telemetry-feed::-webkit-scrollbar { width: 5px; }
+  .telemetry-feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .telem-line { padding: 1px 0; color: var(--text2); }
+  .telem-line .ts { color: #546e7a; margin-right: 6px; }
+  .telem-line .tag { padding: 1px 5px; border-radius: 3px; font-size: 0.7rem; margin-right: 5px; }
+  .telem-line .tag.sim { background: #0d47a1; color: #82b1ff; }
+  .telem-line .tag.act { background: #1b5e20; color: #69f0ae; }
+  .telem-line .tag.safety { background: #e65100; color: #ffab40; }
+  .telem-line .tag.ctx { background: #4a148c; color: #ea80fc; }
+  .telem-line .tag.ep { background: #006064; color: #84ffff; }
+
+  .full-span { grid-column: 1 / -1; }
+
+  footer { position: relative; z-index: 2; text-align: center; padding: 24px; color: var(--text2); font-size: 0.78rem; }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="stars"><canvas id="starfield"></canvas></div>
+
+<header>
+  <h1>P H I L O S</h1>
+  <div class="subtitle">Physical Intelligence, Learning, Optimization &amp; Semantics</div>
+  <div>
+    <span class="version">v0.1.0 &bull; EIC Horizon Europe</span>
+    <span class="conn-badge disconnected" id="connBadge">DISCONNECTED</span>
+  </div>
+</header>
+
+<div class="container">
+<div class="grid">
+
+  <!-- Architecture Diagram -->
+  <div class="card arch-card">
+    <h2><span class="dot"></span> Dual-Loop Architecture</h2>
+    <svg class="arch-svg" viewBox="0 0 900 260" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+          <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#1a2235" stroke-width="0.5"/>
+        </pattern>
+        <linearGradient id="gAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#00e5ff"/><stop offset="100%" stop-color="#7c4dff"/>
+        </linearGradient>
+        <linearGradient id="gGreen" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#00e676"/><stop offset="100%" stop-color="#00e5ff"/>
+        </linearGradient>
+        <filter id="glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <rect width="900" height="260" fill="url(#grid)"/>
+      <text x="450" y="20" text-anchor="middle" fill="#7c4dff" font-size="10" letter-spacing="3" font-weight="600">SYSTEM 2 — 1 Hz REASONING LOOP</text>
+      <g class="node" onclick="highlightNode('lang')"><rect x="30" y="30" width="140" height="46" rx="8" fill="#1a1040" stroke="#7c4dff" stroke-width="1.5"/><text x="100" y="49" text-anchor="middle" fill="#b388ff" font-size="9">Language</text><text x="100" y="63" text-anchor="middle" fill="#7c4dff" font-size="10" font-weight="600">Command</text></g>
+      <g class="node" onclick="highlightNode('vlm')"><rect x="210" y="30" width="140" height="46" rx="8" fill="#1a1040" stroke="#7c4dff" stroke-width="1.5"/><text x="280" y="49" text-anchor="middle" fill="#b388ff" font-size="9">VLM / LLaVA-Next</text><text x="280" y="63" text-anchor="middle" fill="#7c4dff" font-size="10" font-weight="600">Cognitive Engine</text></g>
+      <g class="node" onclick="highlightNode('ctx')"><rect x="390" y="30" width="120" height="46" rx="8" fill="#0d1a2e" stroke="url(#gAccent)" stroke-width="2"/><text x="450" y="49" text-anchor="middle" fill="#80d8ff" font-size="9">Context Vector</text><text x="450" y="63" text-anchor="middle" fill="#00e5ff" font-size="12" font-weight="700">z</text></g>
+      <line x1="170" y1="53" x2="210" y2="53" stroke="#7c4dff" stroke-width="1.5" class="flow-line"/>
+      <line x1="350" y1="53" x2="390" y2="53" stroke="#7c4dff" stroke-width="1.5" class="flow-line"/>
+      <line x1="30" y1="92" x2="870" y2="92" stroke="#1e293b" stroke-width="1" stroke-dasharray="4 4"/>
+      <text x="450" y="110" text-anchor="middle" fill="#00e5ff" font-size="10" letter-spacing="3" font-weight="600">SYSTEM 1 — 50 Hz REFLEX LOOP</text>
+      <g class="node"><rect x="30" y="120" width="130" height="46" rx="8" fill="#0a1a20" stroke="#00e5ff" stroke-width="1.5"/><text x="95" y="139" text-anchor="middle" fill="#80d8ff" font-size="9">YOLO-World + LiDAR</text><text x="95" y="153" text-anchor="middle" fill="#00e5ff" font-size="10" font-weight="600">Perception</text></g>
+      <g class="node"><rect x="200" y="120" width="130" height="46" rx="8" fill="#0a1a20" stroke="#00e5ff" stroke-width="1.5"/><text x="265" y="139" text-anchor="middle" fill="#80d8ff" font-size="9">PPO Policy</text><text x="265" y="153" text-anchor="middle" fill="#00e5ff" font-size="10" font-weight="600">&#x3C0;(s, z)</text></g>
+      <g class="node"><rect x="370" y="120" width="120" height="46" rx="8" fill="#1a1510" stroke="#ff9100" stroke-width="1.5"/><text x="430" y="139" text-anchor="middle" fill="#ffcc80" font-size="9">Safety Shield</text><text x="430" y="153" text-anchor="middle" fill="#ff9100" font-size="10" font-weight="600">MPC Filter</text></g>
+      <g class="node"><rect x="530" y="120" width="120" height="46" rx="8" fill="#0a1a20" stroke="url(#gGreen)" stroke-width="1.5"/><text x="590" y="139" text-anchor="middle" fill="#a5d6a7" font-size="9">Whole-Body</text><text x="590" y="153" text-anchor="middle" fill="#00e676" font-size="10" font-weight="600">Control</text></g>
+      <g class="node"><rect x="690" y="120" width="130" height="46" rx="8" fill="#0d1520" stroke="#546e7a" stroke-width="1.5"/><text x="755" y="139" text-anchor="middle" fill="#90a4ae" font-size="9">Isaac Sim / PhysX 5</text><text x="755" y="153" text-anchor="middle" fill="#78909c" font-size="10" font-weight="600">Simulation</text></g>
+      <line x1="160" y1="143" x2="200" y2="143" stroke="#00e5ff" stroke-width="1.5" class="flow-line"/>
+      <line x1="330" y1="143" x2="370" y2="143" stroke="#00e5ff" stroke-width="1.5" class="flow-line"/>
+      <line x1="490" y1="143" x2="530" y2="143" stroke="#00e676" stroke-width="1.5" class="flow-line"/>
+      <line x1="650" y1="143" x2="690" y2="143" stroke="#546e7a" stroke-width="1.5" class="flow-line"/>
+      <path d="M 450 76 L 450 100 L 265 100 L 265 120" fill="none" stroke="url(#gAccent)" stroke-width="2" class="flow-line" filter="url(#glow)"/>
+      <path d="M 755 166 L 755 210 L 95 210 L 95 166" fill="none" stroke="#37474f" stroke-width="1.5" class="flow-line" stroke-dasharray="6 4"/>
+      <text x="420" y="224" text-anchor="middle" fill="#546e7a" font-size="9" letter-spacing="2">OBSERVATION FEEDBACK</text>
+      <g class="node" onclick="window.location='/docs'"><rect x="560" y="30" width="120" height="46" rx="8" fill="#0d1a2e" stroke="#00e5ff" stroke-width="1" stroke-dasharray="4 2"/><text x="620" y="49" text-anchor="middle" fill="#80d8ff" font-size="9">REST + WebSocket</text><text x="620" y="63" text-anchor="middle" fill="#00e5ff" font-size="10" font-weight="600">API Hub</text></g>
+      <g class="node"><rect x="720" y="30" width="110" height="46" rx="8" fill="#0a180a" stroke="#00e676" stroke-width="1" stroke-dasharray="4 2"/><text x="775" y="49" text-anchor="middle" fill="#a5d6a7" font-size="9">ROS 2 Jazzy</text><text x="775" y="63" text-anchor="middle" fill="#00e676" font-size="10" font-weight="600">Bridge</text></g>
+      <!-- Live data indicator dots — blink on each sim step -->
+      <circle id="archDotRL" cx="328" cy="131" r="4" fill="#455a64"/>
+      <circle id="archDotSafety" cx="488" cy="131" r="4" fill="#455a64"/>
+      <circle id="archDotSim" cx="818" cy="131" r="4" fill="#455a64"/>
+    </svg>
+  </div>
+
+  <!-- Robot Arm (driven by real WebSocket data) -->
+  <div class="card">
+    <h2><span class="dot" id="simDot"></span> Live Simulation — Pour Task</h2>
+    <canvas id="armCanvas"></canvas>
+    <div class="sim-stats">
+      <div class="stat"><div class="val" id="simEpisode">&mdash;</div><div class="lbl">Episode</div></div>
+      <div class="stat"><div class="val" id="simStep">&mdash;</div><div class="lbl">Step</div></div>
+      <div class="stat"><div class="val" id="simReward">&mdash;</div><div class="lbl">Ep Reward</div></div>
+      <div class="stat"><div class="val" id="simValue">&mdash;</div><div class="lbl">Value V(s)</div></div>
+    </div>
+    <div style="margin-top:10px">
+      <div class="progress-label"><span>Poured</span><span id="pouredPct">0%</span></div>
+      <div class="progress-bar"><div class="fill pour" id="pouredBar" style="width:0%"></div></div>
+      <div class="progress-label" style="margin-top:6px"><span>Spilled</span><span id="spillPct">0%</span></div>
+      <div class="progress-bar"><div class="fill spill" id="spillBar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- System Health + Live Joint/Action bars -->
+  <div class="card">
+    <h2><span class="dot"></span> System Health</h2>
+    <div class="modules" id="healthModules">
+      <div class="module-badge"><span class="status-dot offline"></span> Loading...</div>
+    </div>
+    <div class="uptime" id="uptimeDisplay">Connecting...</div>
+    <h2 style="margin-top:16px"><span class="dot" id="jointDot"></span> Joint Positions (live rad)</h2>
+    <div id="jointBars" style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px"></div>
+    <h2 style="margin-top:16px"><span class="dot" id="actDot"></span> Action Vector (live)</h2>
+    <div id="actionBars" style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px"></div>
+  </div>
+
+  <!-- Command Interface -->
+  <div class="card full-span">
+    <h2><span class="dot"></span> Language-to-Reward Command Interface</h2>
+    <div class="cmd-row">
+      <input class="cmd-input" id="cmdInput" placeholder='e.g. "Pour the blue liquid carefully into the glass"' />
+      <button class="cmd-btn" id="cmdBtn" onclick="sendCommand()">Send Command</button>
+    </div>
+    <div class="cmd-response" id="cmdResponse">Awaiting command...</div>
+  </div>
+
+  <!-- Telemetry Feed -->
+  <div class="card full-span">
+    <h2><span class="dot"></span> Live Telemetry (from real PourTaskEnv + WholeBodyPolicy)</h2>
+    <div class="telemetry-feed" id="telemFeed"></div>
+  </div>
+
+</div>
+</div>
+
+<footer>
+  PHILOS &copy; 2025-2026 &bull; EIC Horizon Europe &bull;
+  <a href="/docs">Swagger UI</a> &bull; <a href="/redoc">ReDoc</a> &bull; <a href="/api/v1/health">Health</a> &bull; <a href="/api/v1/simulation/status">Sim Status</a>
+</footer>
+
+<script>
+/* ─── Shared simulation state (updated from WebSocket) ─────────────────── */
+const SIM = {
+  connected: false,
+  joints: [0,0,0,0,0,0],
+  eePos: [0,0,0.5],
+  basePos: [0,0,0],
+  gripper: 0.5,
+  action: new Array(10).fill(0),
+  episode: 0, step: 0,
+  reward: 0, epReward: 0, value: 0,
+  pouredFrac: 0, spillFrac: 0,
+  done: false, safetyOk: true,
+};
+
+/* ─── Starfield ────────────────────────────────────────────────────────── */
+(function(){
+  const c=document.getElementById('starfield'),x=c.getContext('2d');
+  function r(){c.width=innerWidth;c.height=innerHeight}
+  r();addEventListener('resize',r);
+  const s=Array.from({length:140},()=>({x:Math.random()*c.width,y:Math.random()*c.height,r:Math.random()*1.2+0.3,sp:Math.random()*0.2+0.04,a:Math.random()}));
+  !function d(){x.clearRect(0,0,c.width,c.height);for(const p of s){p.a+=(Math.random()-.5)*.02;p.a=Math.max(.1,Math.min(1,p.a));p.y+=p.sp;if(p.y>c.height){p.y=0;p.x=Math.random()*c.width}x.beginPath();x.arc(p.x,p.y,p.r,0,Math.PI*2);x.fillStyle=`rgba(180,210,255,${p.a*.5})`;x.fill()}requestAnimationFrame(d)}();
+})();
+
+/* ─── Robot Arm Canvas (renders from SIM state) ────────────────────────── */
+(function(){
+  const canvas=document.getElementById('armCanvas'),ctx=canvas.getContext('2d');
+  let W,H;
+  function resize(){const r=canvas.getBoundingClientRect();canvas.width=r.width*devicePixelRatio;canvas.height=r.height*devicePixelRatio;ctx.scale(devicePixelRatio,devicePixelRatio);W=r.width;H=r.height}
+  resize();addEventListener('resize',resize);
+
+  const segColors=['#00e5ff','#7c4dff','#00e676','#ff9100','#00e5ff','#e040fb'];
+  const segLens=[75,60,48,38,28,22];
+  const segWidths=[15,12,10,8,6,4];
+  const segBase=[-Math.PI/2, -0.3, 0.2, 0.4, -0.1, 0.0];
+
+  // Fluid particles array
+  let particles = [];
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    const bx=W*0.33, by=H*0.88;
+
+    // Grid floor
+    ctx.strokeStyle='#1a2235';ctx.lineWidth=0.5;
+    for(let i=0;i<W;i+=30){ctx.beginPath();ctx.moveTo(i,H*.88);ctx.lineTo(i,H);ctx.stroke()}
+    for(let i=H*0.88;i<H;i+=15){ctx.beginPath();ctx.moveTo(0,i);ctx.lineTo(W,i);ctx.stroke()}
+
+    // AMR base offset by real base position
+    const baseOff=SIM.basePos[0]*120;
+    const abx=bx+baseOff;
+    ctx.fillStyle='#1a2a3a';ctx.strokeStyle='#00e5ff';ctx.lineWidth=2;
+    roundRect(ctx,abx-42,by-8,84,20,6);
+    ctx.fillStyle='#37474f';ctx.fillRect(abx-40,by+10,18,8);ctx.fillRect(abx+22,by+10,18,8);
+
+    // Draw arm with REAL joint angles
+    let x=abx, y=by-8, cumAngle=0;
+    for(let i=0;i<6;i++){
+      const jAngle=segBase[i]+SIM.joints[i];
+      cumAngle+=jAngle;
+      const nx=x+Math.cos(cumAngle)*segLens[i];
+      const ny=y+Math.sin(cumAngle)*segLens[i];
+      ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(nx,ny);
+      ctx.strokeStyle=segColors[i];ctx.lineWidth=segWidths[i];ctx.lineCap='round';ctx.stroke();
+      ctx.beginPath();ctx.arc(x,y,segWidths[i]*.55,0,Math.PI*2);
+      ctx.fillStyle='#1a2a3a';ctx.fill();ctx.strokeStyle=segColors[i];ctx.lineWidth=2;ctx.stroke();
+      x=nx;y=ny;
+    }
+
+    // End-effector glow
+    ctx.beginPath();ctx.arc(x,y,6,0,Math.PI*2);
+    ctx.fillStyle='#e040fb';ctx.shadowColor='#e040fb';ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
+
+    // Gripper
+    const grip=(1.0-SIM.gripper)*0.5+0.1;
+    ctx.strokeStyle='#e040fb';ctx.lineWidth=3;
+    ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle-grip)*15,y+Math.sin(cumAngle-grip)*15);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle+grip)*15,y+Math.sin(cumAngle+grip)*15);ctx.stroke();
+
+    // Target glass
+    const gx=W*0.74,gy=H*0.72;
+    ctx.strokeStyle='rgba(0,229,255,0.4)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(gx-20,gy-34);ctx.lineTo(gx-16,gy);ctx.lineTo(gx+16,gy);ctx.lineTo(gx+20,gy-34);ctx.stroke();
+
+    // Liquid from REAL poured fraction
+    const fillH=SIM.pouredFrac*34;
+    if(fillH>0){
+      const lT=gy-fillH, wT=16+4*(fillH/34);
+      ctx.fillStyle='rgba(124,77,255,0.45)';
+      ctx.beginPath();ctx.moveTo(gx-wT,lT);ctx.lineTo(gx-16,gy);ctx.lineTo(gx+16,gy);ctx.lineTo(gx+wT,lT);ctx.closePath();ctx.fill();
+    }
+
+    // Spill particles from real spill_frac
+    if(SIM.spillFrac>0.005){
+      const n=Math.min(SIM.spillFrac*300,25);
+      ctx.fillStyle=`rgba(255,23,68,${Math.min(SIM.spillFrac*8,0.6)})`;
+      for(let i=0;i<n;i++){
+        ctx.beginPath();ctx.arc(gx+(Math.random()-.5)*44,gy+Math.random()*16,2,0,Math.PI*2);ctx.fill();
+      }
+    }
+
+    // Active pouring droplets (only while sim is stepping)
+    if(SIM.connected && SIM.step>0 && !SIM.done){
+      if(Math.random()<0.4){
+        particles.push({x:x+(Math.random()-.5)*6, y:y+8, vx:(gx-x)*0.015+(Math.random()-.5), vy:1+Math.random()*2, life:50});
+      }
+    }
+    particles=particles.filter(p=>{
+      p.x+=p.vx;p.y+=p.vy;p.vy+=0.14;p.life--;
+      ctx.beginPath();ctx.arc(p.x,p.y,2,0,Math.PI*2);
+      ctx.fillStyle=`rgba(124,77,255,${p.life/50*0.6})`;ctx.fill();
+      return p.life>0&&p.y<H;
+    });
+
+    // LiDAR sweep
+    const la=(performance.now()/400)%(Math.PI*2);
+    ctx.beginPath();ctx.moveTo(abx,by-20);ctx.arc(abx,by-20,90,la-0.15,la+0.15);ctx.closePath();
+    const lg=ctx.createRadialGradient(abx,by-20,0,abx,by-20,90);
+    lg.addColorStop(0,'rgba(0,229,255,0.12)');lg.addColorStop(1,'rgba(0,229,255,0)');
+    ctx.fillStyle=lg;ctx.fill();
+
+    // Safety envelope
+    ctx.setLineDash([4,4]);
+    ctx.strokeStyle=SIM.safetyOk?'rgba(255,145,0,0.12)':'rgba(255,23,68,0.4)';
+    ctx.lineWidth=1;ctx.beginPath();ctx.arc(abx,by-30,150,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+
+    // Labels
+    ctx.font='9px "Segoe UI",system-ui';ctx.fillStyle='#546e7a';
+    ctx.fillText('AMR Base',abx-22,by+28);
+    ctx.fillText('6-DoF (real joints)',abx-30,by-90);
+    ctx.fillText('Target Glass',gx-25,gy+14);
+    ctx.fillStyle=SIM.safetyOk?'rgba(0,230,118,0.6)':'rgba(255,23,68,0.8)';
+    ctx.fillText(SIM.safetyOk?'Safety: OK':'SAFETY OVERRIDE!',abx+95,by-140);
+
+    // Overlay when disconnected
+    if(!SIM.connected){
+      ctx.fillStyle='rgba(0,0,0,0.55)';ctx.fillRect(0,0,W,H);
+      ctx.font='15px "Segoe UI",system-ui';ctx.fillStyle='#ff9100';ctx.textAlign='center';
+      ctx.fillText('Connecting to live simulation via WebSocket...',W/2,H/2);
+      ctx.textAlign='start';
+    }
+
+    requestAnimationFrame(draw);
+  }
+  draw();
+
+  function roundRect(c,x,y,w,h,r){
+    c.beginPath();c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);c.closePath();c.fill();c.stroke();
+  }
+})();
+
+/* ─── Joint & Action bar visualisations ────────────────────────────────── */
+const jNames=['J1','J2','J3','J4','J5','J6'];
+const aNames=['vx','vy','\u03c9','j1','j2','j3','j4','j5','j6','grip'];
+function initBars(){
+  document.getElementById('jointBars').innerHTML=jNames.map((_,i)=>`
+    <div style="text-align:center">
+      <div style="height:55px;position:relative;background:var(--bg);border-radius:4px;overflow:hidden">
+        <div id="jbar${i}" style="position:absolute;bottom:0;width:100%;height:50%;background:linear-gradient(0deg,#00e5ff44,#7c4dff44);transition:height .15s;border-radius:0 0 4px 4px"></div>
+        <div id="jval${i}" style="position:absolute;width:100%;top:50%;transform:translateY(-50%);font-size:.68rem;color:var(--accent);font-family:monospace">0.00</div>
+      </div>
+      <div style="font-size:.62rem;color:var(--text2);margin-top:2px">${jNames[i]}</div>
+    </div>`).join('');
+  document.getElementById('actionBars').innerHTML=aNames.map((_,i)=>`
+    <div style="text-align:center">
+      <div style="height:38px;position:relative;background:var(--bg);border-radius:4px;overflow:hidden">
+        <div id="abar${i}" style="position:absolute;bottom:0;width:100%;height:50%;background:linear-gradient(0deg,#00e67644,#00e5ff44);transition:height .15s;border-radius:0 0 4px 4px"></div>
+        <div id="aval${i}" style="position:absolute;width:100%;top:50%;transform:translateY(-50%);font-size:.58rem;color:var(--accent3);font-family:monospace">0</div>
+      </div>
+      <div style="font-size:.58rem;color:var(--text2);margin-top:2px">${aNames[i]}</div>
+    </div>`).join('');
+}
+initBars();
+
+function updateBars(){
+  for(let i=0;i<6;i++){
+    const v=SIM.joints[i]||0;const p=Math.min(Math.abs(v)/1.5*100,100);
+    const b=document.getElementById('jbar'+i),l=document.getElementById('jval'+i);
+    if(b){b.style.height=p+'%';b.style.background=v>=0?'linear-gradient(0deg,#00e5ff44,#7c4dff44)':'linear-gradient(0deg,#ff174444,#ff910044)'}
+    if(l)l.textContent=v.toFixed(3);
+  }
+  for(let i=0;i<10;i++){
+    const v=SIM.action[i]||0;const p=Math.min(Math.abs(v)/1*100,100);
+    const b=document.getElementById('abar'+i),l=document.getElementById('aval'+i);
+    if(b)b.style.height=p+'%';
+    if(l)l.textContent=v.toFixed(3);
+  }
+}
+
+/* ─── WebSocket — receives REAL simulation data ────────────────────────── */
+let ws=null;
+function connectWS(){
+  ws=new WebSocket(`ws://${location.host}/ws/telemetry`);
+  ws.onopen=()=>{
+    SIM.connected=true;
+    document.getElementById('connBadge').className='conn-badge connected';
+    document.getElementById('connBadge').textContent='LIVE';
+    document.getElementById('simDot').className='dot';
+    document.getElementById('jointDot').className='dot';
+    document.getElementById('actDot').className='dot';
+    addTelemetry('sim','WebSocket connected — receiving live data from PourTaskEnv + WholeBodyPolicy');
+  };
+
+  ws.onmessage=(e)=>{
+    const d=JSON.parse(e.data);
+    if(d.type==='sim_step'){
+      SIM.joints=d.joints||SIM.joints;
+      SIM.eePos=d.ee_pos||SIM.eePos;
+      SIM.basePos=d.base_pos||SIM.basePos;
+      SIM.gripper=d.gripper??SIM.gripper;
+      SIM.action=d.action||SIM.action;
+      SIM.episode=d.episode; SIM.step=d.step;
+      SIM.reward=d.reward; SIM.epReward=d.ep_reward;
+      SIM.value=d.value;
+      SIM.pouredFrac=d.poured_frac; SIM.spillFrac=d.spill_frac;
+      SIM.done=d.done; SIM.safetyOk=d.safety_ok;
+
+      document.getElementById('simEpisode').textContent=d.episode;
+      document.getElementById('simStep').textContent=d.step;
+      document.getElementById('simReward').textContent=d.ep_reward.toFixed(1);
+      document.getElementById('simValue').textContent=d.value.toFixed(2);
+      document.getElementById('pouredPct').textContent=(d.poured_frac*100).toFixed(1)+'%';
+      document.getElementById('pouredBar').style.width=Math.min(d.poured_frac*100,100)+'%';
+      document.getElementById('spillPct').textContent=(d.spill_frac*100).toFixed(2)+'%';
+      document.getElementById('spillBar').style.width=Math.min(d.spill_frac*200,100)+'%';
+
+      blinkDot('archDotRL','#00e5ff');
+      blinkDot('archDotSafety',d.safety_ok?'#ff9100':'#ff1744');
+      blinkDot('archDotSim','#78909c');
+      updateBars();
+
+      if(d.step%25===0){
+        addTelemetry('sim',`Ep${d.episode} Step ${d.step} | joints=[${d.joints.map(j=>j.toFixed(3)).join(',')}] | poured=${(d.poured_frac*100).toFixed(1)}%`);
+        addTelemetry('act',`action=[${d.action.map(a=>a.toFixed(3)).join(',')}] reward=${d.reward.toFixed(3)} V=${d.value.toFixed(3)}`);
+        if(!d.safety_ok) addTelemetry('safety','Safety shield override active!');
+      }
+    } else if(d.type==='sim_episode_start'){
+      addTelemetry('ep',`\u2501\u2501 Episode ${d.episode} started \u2501\u2501`);
+    } else if(d.type==='sim_episode_end'){
+      addTelemetry('ep',`Episode ${d.episode} done: reward=${d.total_reward} steps=${d.steps} poured=${(d.poured_frac*100).toFixed(1)}% spilled=${(d.spill_frac*100).toFixed(2)}%`);
+    } else if(d.type==='context_update'){
+      addTelemetry('ctx','Context vector z updated: mode='+(d.data?.manipulation_mode||'?'));
+    } else {
+      addTelemetry('sim',JSON.stringify(d));
+    }
+  };
+
+  ws.onclose=()=>{
+    SIM.connected=false;
+    document.getElementById('connBadge').className='conn-badge disconnected';
+    document.getElementById('connBadge').textContent='DISCONNECTED';
+    document.getElementById('simDot').className='dot off';
+    addTelemetry('sim','WebSocket disconnected — reconnecting in 3s');
+    setTimeout(connectWS,3000);
+  };
+  ws.onerror=()=>{ws.close()};
+}
+connectWS();
+
+function blinkDot(id,c){const e=document.getElementById(id);if(!e)return;e.setAttribute('fill',c);setTimeout(()=>e.setAttribute('fill','#455a64'),200)}
+
+/* ─── Health Polling ───────────────────────────────────────────────────── */
+async function pollHealth(){
+  try{
+    const r=await fetch('/api/v1/health'),d=await r.json();
+    document.getElementById('healthModules').innerHTML=d.modules.map(m=>
+      `<div class="module-badge"><span class="status-dot ${m.status}"></span>${m.module}</div>`
+    ).join('');
+    const u=d.uptime_seconds,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=Math.floor(u%60);
+    document.getElementById('uptimeDisplay').textContent=`Uptime: ${h}h ${m}m ${s}s \u2022 Status: ${d.system_status.toUpperCase()}`;
+  }catch(e){
+    document.getElementById('healthModules').innerHTML='<div class="module-badge"><span class="status-dot error"></span>Connection lost</div>';
+  }
+}
+pollHealth();setInterval(pollHealth,4000);
+
+/* ─── Command ──────────────────────────────────────────────────────────── */
+document.getElementById('cmdInput').addEventListener('keydown',e=>{if(e.key==='Enter')sendCommand()});
+async function sendCommand(){
+  const input=document.getElementById('cmdInput'),resp=document.getElementById('cmdResponse');
+  const cmd=input.value.trim();if(!cmd)return;
+  resp.textContent='Processing...';resp.className='cmd-response';
+  document.getElementById('cmdBtn').disabled=true;
+  try{
+    const r=await fetch('/api/v1/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})});
+    const d=await r.json();
+    resp.textContent=JSON.stringify(d,null,2);resp.className='cmd-response success';
+    addTelemetry('ctx',`Command: "${cmd}" \u2192 ${d.interpretation}`);
+  }catch(e){resp.textContent=`Error: ${e.message}`;resp.className='cmd-response error'}
+  document.getElementById('cmdBtn').disabled=false;
+}
+
+/* ─── Telemetry Feed ───────────────────────────────────────────────────── */
+const tf=document.getElementById('telemFeed');let tc=0;
+function addTelemetry(tag,msg){
+  const t=new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:1});
+  const l=document.createElement('div');l.className='telem-line';
+  l.innerHTML=`<span class="ts">${t}</span><span class="tag ${tag}">${tag.toUpperCase()}</span>${msg}`;
+  tf.prepend(l);tc++;if(tc>400)tf.removeChild(tf.lastChild);
+}
+addTelemetry('sim','Dashboard loaded \u2014 connecting to live backend simulation...');
+
+function highlightNode(n){
+  const d={lang:'Language Command \u2192 operator instruction \u2192 VLM.',vlm:'Cognitive Engine \u2192 LLaVA-Next VLM for semantic grounding.',ctx:'Context Vector z \u2192 267-dim embedding conditioning \u03c0(s,z).'};
+  if(d[n])addTelemetry('ctx',d[n]);
+}
+</script>
+</body>
+</html>
