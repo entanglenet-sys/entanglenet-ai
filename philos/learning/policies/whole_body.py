@@ -198,6 +198,54 @@ class WholeBodyPolicy(BasePolicy):
 
         return float(value.item())
 
+    def predict_with_value(
+        self,
+        obs: np.ndarray,
+        deterministic: bool = False,
+    ) -> tuple[np.ndarray, float, float]:
+        """Predict action, log-probability, and state value from a raw observation.
+
+        This is a convenience method for training loops that work with
+        flat numpy observations rather than structured RobotState/ContextVector.
+
+        Returns:
+            Tuple of (action, log_prob, value).
+        """
+        if self._policy_net is None or self._value_net is None:
+            action = np.zeros(self._action_dim, dtype=np.float32)
+            return action, 0.0, 0.0
+
+        import torch
+
+        obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self._device)
+
+        with torch.no_grad():
+            # Policy
+            output = self._policy_net(obs_tensor)
+            mean = output[:, :self._action_dim]
+            log_std = torch.clamp(output[:, self._action_dim:], -5, 2)
+            std = torch.exp(log_std)
+
+            if deterministic:
+                action = mean
+                dist = torch.distributions.Normal(mean, std)
+                log_prob = dist.log_prob(action).sum(dim=-1)
+            else:
+                dist = torch.distributions.Normal(mean, std)
+                action = dist.sample()
+                log_prob = dist.log_prob(action).sum(dim=-1)
+
+            action = torch.tanh(action)
+
+            # Value
+            value = self._value_net(obs_tensor).squeeze(-1)
+
+        return (
+            action.cpu().numpy().flatten(),
+            float(log_prob.item()),
+            float(value.item()),
+        )
+
     def train_step(self, batch: dict[str, np.ndarray]) -> dict[str, float]:
         """Perform a PPO training step.
 

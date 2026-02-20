@@ -96,15 +96,24 @@ def train(args: argparse.Namespace) -> None:
     obs_dim = env._config.obs_dim if hasattr(env, "_config") else 48
     action_dim = env._config.action_dim if hasattr(env, "_config") else 10
 
+    # Detect device
+    try:
+        import torch
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        device = "cpu"
+
     # Create policy
     policy = WholeBodyPolicy(
         state_dim=obs_dim - 18,  # Subtract context dim
         context_dim=18,
         action_dim=action_dim,
         hidden_dims=[512, 256, 128],
-        lr=args.lr,
+        learning_rate=args.lr,
+        device=device,
     )
-    logger.info(f"Policy: WholeBodyPolicy (obs={obs_dim}, act={action_dim})")
+    policy.initialize()
+    logger.info(f"Policy: WholeBodyPolicy (obs={obs_dim}, act={action_dim}, device={device})")
 
     # Create reward function & domain randomizer
     reward_fn = DynamicRewardFunction()
@@ -176,13 +185,27 @@ def train(args: argparse.Namespace) -> None:
 
         # Train on collected rollout
         if len(rollout_obs) >= args.batch_size // 10:  # Minimum batch
+            rewards = np.array(rollout_rewards)
+            values = np.array(rollout_values)
+            dones = np.array(rollout_dones, dtype=np.float32)
+
+            # Compute GAE advantages & discounted returns
+            advantages = np.zeros_like(rewards)
+            gae = 0.0
+            gamma, lam = 0.99, 0.95
+            for t in reversed(range(len(rewards))):
+                next_val = 0.0 if t == len(rewards) - 1 else values[t + 1]
+                delta = rewards[t] + gamma * next_val * (1.0 - dones[t]) - values[t]
+                gae = delta + gamma * lam * (1.0 - dones[t]) * gae
+                advantages[t] = gae
+            returns = advantages + values
+
             batch = {
                 "observations": np.array(rollout_obs),
                 "actions": np.array(rollout_actions),
-                "rewards": np.array(rollout_rewards),
-                "dones": np.array(rollout_dones),
-                "log_probs": np.array(rollout_log_probs),
-                "values": np.array(rollout_values),
+                "old_log_probs": np.array(rollout_log_probs),
+                "advantages": advantages,
+                "returns": returns,
             }
             train_info = policy.train_step(batch)
 
