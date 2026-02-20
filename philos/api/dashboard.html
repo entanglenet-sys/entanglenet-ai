@@ -170,6 +170,12 @@
       <div class="stat"><div class="val" id="simReward">&mdash;</div><div class="lbl">Ep Reward</div></div>
       <div class="stat"><div class="val" id="simValue">&mdash;</div><div class="lbl">Value V(s)</div></div>
     </div>
+    <div class="sim-stats" style="margin-top:8px">
+      <div class="stat"><div class="val" id="simPhase" style="font-size:0.9rem">APPROACH</div><div class="lbl">Task Phase</div></div>
+      <div class="stat"><div class="val" id="simTilt">0&deg;</div><div class="lbl">Beaker Tilt</div></div>
+      <div class="stat"><div class="val" id="simFluid">250</div><div class="lbl">Fluid ml</div></div>
+      <div class="stat"><div class="val" id="simGrasped" style="font-size:0.9rem">&mdash;</div><div class="lbl">Grasped</div></div>
+    </div>
     <div style="margin-top:10px">
       <div class="progress-label"><span>Poured</span><span id="pouredPct">0%</span></div>
       <div class="progress-bar"><div class="fill pour" id="pouredBar" style="width:0%"></div></div>
@@ -228,6 +234,13 @@ const SIM = {
   reward: 0, epReward: 0, value: 0,
   pouredFrac: 0, spillFrac: 0,
   done: false, safetyOk: true,
+  // ── New physical state ──
+  phase: 'approach',
+  beakerPos: [0.5, 0.0, 0.85],
+  glassPos: [0.5, 0.38, 0.78],
+  beakerTiltDeg: 0,
+  fluidInBeaker: 250,
+  grasped: false,
 };
 
 /* ─── Starfield ────────────────────────────────────────────────────────── */
@@ -253,10 +266,25 @@ const SIM = {
 
   // Fluid particles array
   let particles = [];
+  const CHEM_COLOR = 'rgba(0,200,255,0.7)';
+  const CHEM_COLOR2 = 'rgba(0,180,240,0.55)';
+  const SPILL_COLOR = 'rgba(255,80,80,0.5)';
 
   function draw(){
     ctx.clearRect(0,0,W,H);
-    const bx=W*0.33, by=H*0.88;
+    const bx=W*0.30, by=H*0.88;
+
+    // ── Lab bench surface ──
+    const benchY = H*0.70;
+    ctx.fillStyle='#2a1f14';
+    ctx.fillRect(W*0.50, benchY, W*0.48, 8);
+    ctx.fillStyle='#3b2a1a';
+    ctx.fillRect(W*0.50, benchY+8, W*0.48, 4);
+    ctx.fillStyle='#1a1210';
+    ctx.fillRect(W*0.58, benchY+12, 6, H-benchY-12);
+    ctx.fillRect(W*0.88, benchY+12, 6, H-benchY-12);
+    ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#5a4a3a';
+    ctx.fillText('Lab Bench', W*0.66, benchY-3);
 
     // Grid floor
     ctx.strokeStyle='#1a2235';ctx.lineWidth=0.5;
@@ -294,39 +322,118 @@ const SIM = {
     ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle-grip)*15,y+Math.sin(cumAngle-grip)*15);ctx.stroke();
     ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle+grip)*15,y+Math.sin(cumAngle+grip)*15);ctx.stroke();
 
-    // Target glass
-    const gx=W*0.74,gy=H*0.72;
-    ctx.strokeStyle='rgba(0,229,255,0.4)';ctx.lineWidth=2;
-    ctx.beginPath();ctx.moveTo(gx-20,gy-34);ctx.lineTo(gx-16,gy);ctx.lineTo(gx+16,gy);ctx.lineTo(gx+20,gy-34);ctx.stroke();
-
-    // Liquid from REAL poured fraction
-    const fillH=SIM.pouredFrac*34;
-    if(fillH>0){
-      const lT=gy-fillH, wT=16+4*(fillH/34);
-      ctx.fillStyle='rgba(124,77,255,0.45)';
-      ctx.beginPath();ctx.moveTo(gx-wT,lT);ctx.lineTo(gx-16,gy);ctx.lineTo(gx+16,gy);ctx.lineTo(gx+wT,lT);ctx.closePath();ctx.fill();
+    // ── Beaker ──
+    const bkW = 16, bkH = 28; // beaker dimensions (px)
+    let bkx, bky, bkTilt;
+    if (SIM.grasped) {
+      // Beaker follows EE
+      bkx = x; bky = y + 8;
+      bkTilt = cumAngle + Math.PI/2; // tilt from cumulative arm angle
+    } else {
+      // Beaker on the bench
+      bkx = W*0.62; bky = benchY - 1;
+      bkTilt = 0;
     }
 
-    // Spill particles from real spill_frac
+    ctx.save();
+    ctx.translate(bkx, bky);
+    ctx.rotate(bkTilt);
+
+    // Beaker body (trapezoid outline)
+    ctx.strokeStyle='rgba(200,230,255,0.6)';ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.moveTo(-bkW*0.4, 0); ctx.lineTo(-bkW*0.5, -bkH);
+    ctx.lineTo(bkW*0.5, -bkH); ctx.lineTo(bkW*0.4, 0);
+    ctx.closePath(); ctx.stroke();
+    // Beaker spout (small lip)
+    ctx.beginPath(); ctx.moveTo(bkW*0.5, -bkH); ctx.lineTo(bkW*0.6, -bkH-3); ctx.stroke();
+
+    // Chemical liquid inside beaker
+    const fluidFrac = SIM.fluidInBeaker / 250.0;
+    if (fluidFrac > 0.01) {
+      const lH = bkH * fluidFrac;
+      const lBot = 0, lTop = -lH;
+      const wBot = bkW*0.4, wTop = bkW * (0.4 + 0.1 * (lH/bkH));
+      ctx.fillStyle = CHEM_COLOR;
+      ctx.beginPath();
+      ctx.moveTo(-wBot, lBot); ctx.lineTo(-wTop, lTop);
+      ctx.lineTo(wTop, lTop); ctx.lineTo(wBot, lBot);
+      ctx.closePath(); ctx.fill();
+      // Surface shimmer
+      ctx.strokeStyle='rgba(150,240,255,0.4)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(-wTop+1, lTop);ctx.lineTo(wTop-1, lTop);ctx.stroke();
+    }
+
+    ctx.restore();
+
+    // Beaker label
+    if (!SIM.grasped) {
+      ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#80cbc4';
+      ctx.fillText('Beaker ('+Math.round(SIM.fluidInBeaker)+' ml)', bkx-28, bky+14);
+    }
+
+    // ── Target Glass ──
+    const gx=W*0.78, gy=benchY-1;
+    const glW=22, glH=36;
+    // Glass outline
+    ctx.strokeStyle='rgba(200,230,255,0.35)';ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.moveTo(gx-glW*0.45, gy-glH); ctx.lineTo(gx-glW*0.5, gy);
+    ctx.lineTo(gx+glW*0.5, gy); ctx.lineTo(gx+glW*0.45, gy-glH);
+    ctx.stroke();
+    // Glass bottom
+    ctx.beginPath();ctx.moveTo(gx-glW*0.5, gy);ctx.lineTo(gx+glW*0.5, gy);ctx.stroke();
+
+    // Liquid filling (real poured fraction)
+    const pourH = SIM.pouredFrac * glH;
+    if(pourH > 0.5){
+      const lBot = gy, lTop = gy - pourH;
+      const wBot = glW*0.5, wTop = glW * (0.45 + 0.05 * (pourH/glH));
+      ctx.fillStyle = CHEM_COLOR2;
+      ctx.beginPath();
+      ctx.moveTo(gx-wBot, lBot); ctx.lineTo(gx-wTop, lTop);
+      ctx.lineTo(gx+wTop, lTop); ctx.lineTo(gx+wBot, lBot);
+      ctx.closePath(); ctx.fill();
+      // Surface shimmer
+      ctx.strokeStyle='rgba(100,220,255,0.35)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(gx-wTop+1, lTop);ctx.lineTo(gx+wTop-1, lTop);ctx.stroke();
+    }
+
+    // Glass label
+    ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#80cbc4';
+    ctx.fillText('Glass ('+(SIM.pouredFrac*250).toFixed(0)+' ml)', gx-22, gy+14);
+
+    // Spill puddle on bench
     if(SIM.spillFrac>0.005){
-      const n=Math.min(SIM.spillFrac*300,25);
-      ctx.fillStyle=`rgba(255,23,68,${Math.min(SIM.spillFrac*8,0.6)})`;
-      for(let i=0;i<n;i++){
-        ctx.beginPath();ctx.arc(gx+(Math.random()-.5)*44,gy+Math.random()*16,2,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle = SPILL_COLOR;
+      const pw = 6 + SIM.spillFrac*60;
+      ctx.beginPath(); ctx.ellipse(gx, gy+4, pw, 3, 0, 0, Math.PI*2); ctx.fill();
+    }
+
+    // ── Pour stream (liquid flowing from beaker to glass) ──
+    if(SIM.grasped && SIM.phase==='pour' && SIM.fluidInBeaker>0){
+      // Create cyan droplets from beaker to glass
+      if(Math.random()<0.7){
+        particles.push({x:bkx+(Math.random()-.5)*6, y:bky+bkH*0.3, vx:(gx-bkx)*0.012+(Math.random()-.5)*0.5, vy:1.5+Math.random()*2, life:45, type:'pour'});
+      }
+    }
+    // Spill particles during transport tilt
+    if(SIM.grasped && SIM.phase==='transport' && SIM.beakerTiltDeg>8){
+      if(Math.random()<0.3){
+        particles.push({x:bkx+(Math.random()-.5)*8, y:bky, vx:(Math.random()-.5)*2, vy:1+Math.random(), life:30, type:'spill'});
       }
     }
 
-    // Active pouring droplets (only while sim is stepping)
-    if(SIM.connected && SIM.step>0 && !SIM.done){
-      if(Math.random()<0.4){
-        particles.push({x:x+(Math.random()-.5)*6, y:y+8, vx:(gx-x)*0.015+(Math.random()-.5), vy:1+Math.random()*2, life:50});
-      }
-    }
     particles=particles.filter(p=>{
-      p.x+=p.vx;p.y+=p.vy;p.vy+=0.14;p.life--;
-      ctx.beginPath();ctx.arc(p.x,p.y,2,0,Math.PI*2);
-      ctx.fillStyle=`rgba(124,77,255,${p.life/50*0.6})`;ctx.fill();
-      return p.life>0&&p.y<H;
+      p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life--;
+      ctx.beginPath();ctx.arc(p.x,p.y,p.type==='pour'?2.5:1.5,0,Math.PI*2);
+      if(p.type==='pour'){
+        ctx.fillStyle=`rgba(0,200,255,${p.life/45*0.7})`;
+      } else {
+        ctx.fillStyle=`rgba(255,80,80,${p.life/30*0.5})`;
+      }
+      ctx.fill();
+      return p.life>0 && p.y<H;
     });
 
     // LiDAR sweep
@@ -341,13 +448,30 @@ const SIM = {
     ctx.strokeStyle=SIM.safetyOk?'rgba(255,145,0,0.12)':'rgba(255,23,68,0.4)';
     ctx.lineWidth=1;ctx.beginPath();ctx.arc(abx,by-30,150,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
 
+    // ── Tilt indicator (arc near EE) ──
+    if(SIM.grasped){
+      const tiltRad = SIM.beakerTiltDeg * Math.PI / 180;
+      ctx.strokeStyle = SIM.beakerTiltDeg > 15 ? 'rgba(0,229,255,0.6)' : 'rgba(255,145,0,0.4)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 20, -Math.PI/2, -Math.PI/2 + tiltRad, false);
+      ctx.stroke();
+      ctx.font='8px monospace'; ctx.fillStyle='#00e5ff';
+      ctx.fillText(SIM.beakerTiltDeg.toFixed(0)+'°', x+22, y-8);
+    }
+
     // Labels
     ctx.font='9px "Segoe UI",system-ui';ctx.fillStyle='#546e7a';
     ctx.fillText('AMR Base',abx-22,by+28);
-    ctx.fillText('6-DoF (real joints)',abx-30,by-90);
-    ctx.fillText('Target Glass',gx-25,gy+14);
+    ctx.fillText('6-DoF UR5e-class',abx-30,by-90);
     ctx.fillStyle=SIM.safetyOk?'rgba(0,230,118,0.6)':'rgba(255,23,68,0.8)';
     ctx.fillText(SIM.safetyOk?'Safety: OK':'SAFETY OVERRIDE!',abx+95,by-140);
+
+    // Phase label
+    const phaseColors = {approach:'#ff9100', grasp:'#e040fb', transport:'#7c4dff', pour:'#00e5ff', done:'#00e676'};
+    ctx.font='bold 11px "Segoe UI",system-ui';
+    ctx.fillStyle = phaseColors[SIM.phase] || '#546e7a';
+    ctx.fillText('Phase: ' + SIM.phase.toUpperCase(), W*0.02, 18);
 
     // Overlay when disconnected
     if(!SIM.connected){
@@ -431,6 +555,13 @@ function connectWS(){
       SIM.value=d.value;
       SIM.pouredFrac=d.poured_frac; SIM.spillFrac=d.spill_frac;
       SIM.done=d.done; SIM.safetyOk=d.safety_ok;
+      // New physical state
+      SIM.phase=d.phase||SIM.phase;
+      SIM.beakerPos=d.beaker_pos||SIM.beakerPos;
+      SIM.glassPos=d.glass_pos||SIM.glassPos;
+      SIM.beakerTiltDeg=d.beaker_tilt_deg??SIM.beakerTiltDeg;
+      SIM.fluidInBeaker=d.fluid_in_beaker??SIM.fluidInBeaker;
+      SIM.grasped=d.grasped??SIM.grasped;
 
       document.getElementById('simEpisode').textContent=d.episode;
       document.getElementById('simStep').textContent=d.step;
@@ -440,6 +571,15 @@ function connectWS(){
       document.getElementById('pouredBar').style.width=Math.min(d.poured_frac*100,100)+'%';
       document.getElementById('spillPct').textContent=(d.spill_frac*100).toFixed(2)+'%';
       document.getElementById('spillBar').style.width=Math.min(d.spill_frac*200,100)+'%';
+      // New UI elements
+      const phaseEl=document.getElementById('simPhase');
+      if(phaseEl){phaseEl.textContent=(d.phase||'?').toUpperCase()}
+      const tiltEl=document.getElementById('simTilt');
+      if(tiltEl){tiltEl.textContent=(d.beaker_tilt_deg||0).toFixed(0)+'\u00B0'}
+      const fluidEl=document.getElementById('simFluid');
+      if(fluidEl){fluidEl.textContent=Math.round(d.fluid_in_beaker||0)}
+      const graspEl=document.getElementById('simGrasped');
+      if(graspEl){graspEl.textContent=d.grasped?'YES':'NO'; graspEl.style.color=d.grasped?'#00e676':'#546e7a'}
 
       blinkDot('archDotRL','#00e5ff');
       blinkDot('archDotSafety',d.safety_ok?'#ff9100':'#ff1744');
@@ -447,14 +587,14 @@ function connectWS(){
       updateBars();
 
       if(d.step%25===0){
-        addTelemetry('sim',`Ep${d.episode} Step ${d.step} | joints=[${d.joints.map(j=>j.toFixed(3)).join(',')}] | poured=${(d.poured_frac*100).toFixed(1)}%`);
+        addTelemetry('sim',`Ep${d.episode} Step ${d.step} | phase=${(d.phase||'?').toUpperCase()} | tilt=${(d.beaker_tilt_deg||0).toFixed(1)}\u00B0 | fluid=${Math.round(d.fluid_in_beaker||0)}ml | poured=${(d.poured_frac*100).toFixed(1)}%`);
         addTelemetry('act',`action=[${d.action.map(a=>a.toFixed(3)).join(',')}] reward=${d.reward.toFixed(3)} V=${d.value.toFixed(3)}`);
         if(!d.safety_ok) addTelemetry('safety','Safety shield override active!');
       }
     } else if(d.type==='sim_episode_start'){
       addTelemetry('ep',`\u2501\u2501 Episode ${d.episode} started \u2501\u2501`);
     } else if(d.type==='sim_episode_end'){
-      addTelemetry('ep',`Episode ${d.episode} done: reward=${d.total_reward} steps=${d.steps} poured=${(d.poured_frac*100).toFixed(1)}% spilled=${(d.spill_frac*100).toFixed(2)}%`);
+      addTelemetry('ep',`Episode ${d.episode} done: reward=${d.total_reward} steps=${d.steps} poured=${(d.poured_frac*100).toFixed(1)}% spilled=${(d.spill_frac*100).toFixed(2)}% phase=${(d.phase||'?').toUpperCase()}`);
     } else if(d.type==='context_update'){
       addTelemetry('ctx','Context vector z updated: mode='+(d.data?.manipulation_mode||'?'));
     } else {

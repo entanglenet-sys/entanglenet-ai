@@ -146,8 +146,9 @@ async def _run_simulation_loop() -> None:
                 joint_positions = env._stub_joint_pos.tolist()
                 ee_pos = env._stub_ee_pos.tolist()
                 base_pos = env._stub_base_pos.tolist()
-                poured_frac = env._poured_volume / cfg.source_volume_ml
-                spill_frac = env._spilled_volume / cfg.source_volume_ml
+                total_vol = cfg.source_volume_ml if cfg.source_volume_ml > 0 else 1.0
+                poured_frac = env._poured_volume / total_vol
+                spill_frac = env._spilled_volume / total_vol
 
                 telem = {
                     "type": "sim_step",
@@ -165,6 +166,13 @@ async def _run_simulation_loop() -> None:
                     "value": round(float(value), 3),
                     "done": done,
                     "safety_ok": safe_cmd.is_safe,
+                    # ── New physical telemetry ──
+                    "phase": env._phase.value,
+                    "beaker_pos": env._beaker_pos.tolist(),
+                    "glass_pos": env._glass_pos.tolist(),
+                    "beaker_tilt_deg": round(env._wrist_tilt_deg, 1),
+                    "fluid_in_beaker": round(env._fluid_in_beaker, 1),
+                    "grasped": env._grasped,
                 }
                 await _broadcast_telemetry(telem)
 
@@ -174,13 +182,15 @@ async def _run_simulation_loop() -> None:
                 await asyncio.sleep(0.05)
 
             # Episode end
+            total_vol = cfg.source_volume_ml if cfg.source_volume_ml > 0 else 1.0
             await _broadcast_telemetry({
                 "type": "sim_episode_end",
                 "episode": episode,
                 "total_reward": round(ep_reward, 2),
                 "steps": step,
-                "poured_frac": round(env._poured_volume / cfg.source_volume_ml, 4),
-                "spill_frac": round(env._spilled_volume / cfg.source_volume_ml, 4),
+                "poured_frac": round(env._poured_volume / total_vol, 4),
+                "spill_frac": round(env._spilled_volume / total_vol, 4),
+                "phase": env._phase.value,
             })
 
             # Brief pause between episodes
