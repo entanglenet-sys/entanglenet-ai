@@ -81,7 +81,7 @@ class PhilosROS2Bridge(Node):  # type: ignore[misc]
         self._safety_shield = SafetyShield()
         self._context_vector: ContextVector | None = None
         self._robot_state = RobotState(
-            joint_states=[JointState(name=f"joint_{i}", position=0.0) for i in range(6)],
+            joints=[JointState(name=f"joint_{i}", position=0.0) for i in range(6)],
             amr=AMRState(),
         )
 

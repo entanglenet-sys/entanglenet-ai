@@ -12,7 +12,7 @@ from philos.core.state import RobotState, JointState, AMRState
 def make_state(**kwargs) -> RobotState:
     """Helper to create a RobotState for testing."""
     return RobotState(
-        joint_states=[JointState(name=f"j{i}", position=0.0) for i in range(6)],
+        joints=[JointState(name=f"j{i}", position=0.0) for i in range(6)],
         amr=AMRState(**kwargs.get("amr", {})),
     )
 

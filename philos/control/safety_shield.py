@@ -356,5 +356,7 @@ class SafetyShield(BaseController):
         Returns minimum obstacle distance in metres.
         """
         if state.lidar_scan is not None and len(state.lidar_scan) > 0:
-            return float(np.min(state.lidar_scan[state.lidar_scan > 0.01]))
+            valid = state.lidar_scan[state.lidar_scan > 0.01]
+            if len(valid) > 0:
+                return float(np.min(valid))
         return float("inf")

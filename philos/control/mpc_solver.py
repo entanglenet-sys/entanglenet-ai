@@ -204,8 +204,8 @@ class WholeBodyMPC(BaseController):
                 siny_cosp = 2.0 * (q[3] * q[2] + q[0] * q[1])
                 cosy_cosp = 1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2)
                 x[2] = np.arctan2(siny_cosp, cosy_cosp)
-        if state.joint_states:
-            for i, js in enumerate(state.joint_states[:6]):
+        if state.joints:
+            for i, js in enumerate(state.joints[:6]):
                 x[3 + i] = js.position
         return x
 

@@ -232,15 +232,15 @@ class IsaacSimEnv(abc.ABC):
             # Extract from Isaac Sim
             joint_positions = self._robot.get_joint_positions()
             joint_velocities = self._robot.get_joint_velocities()
-            joint_states = [
+            joints = [
                 JointState(name=f"joint_{i}", position=float(p), velocity=float(v))
                 for i, (p, v) in enumerate(zip(joint_positions, joint_velocities))
             ]
-            return RobotState(joint_states=joint_states)
+            return RobotState(joints=joints)
 
         # Stub state
         return RobotState(
-            joint_states=[JointState(name=f"joint_{i}", position=0.0) for i in range(6)],
+            joints=[JointState(name=f"joint_{i}", position=0.0) for i in range(6)],
             amr=AMRState(),
             end_effector=EndEffectorState(),
         )
