@@ -98,6 +98,15 @@ async def _run_simulation_loop() -> None:
         safety = SafetyShield()
         logger.info(f"Simulation loop ready (device={device})")
 
+        # ── Online PPO rollout buffer ──
+        rollout_obs: list = []
+        rollout_actions: list = []
+        rollout_log_probs: list = []
+        rollout_rewards: list = []
+        rollout_values: list = []
+        rollout_dones: list = []
+        _gamma, _lam = 0.99, 0.95
+
         episode = 0
         _sim_running = True
         while _sim_running:
@@ -116,6 +125,12 @@ async def _run_simulation_loop() -> None:
             while not done and _sim_running:
                 # Policy inference
                 action, log_prob, value = policy.predict_with_value(obs)
+
+                # ── Collect transition for PPO ──
+                rollout_obs.append(obs.copy())
+                rollout_actions.append(action.copy())
+                rollout_log_probs.append(float(log_prob))
+                rollout_values.append(float(value))
 
                 # Safety filter
                 from philos.core.state import RobotState, JointState, AMRState, EndEffectorState
@@ -141,6 +156,10 @@ async def _run_simulation_loop() -> None:
                 done = terminated or truncated
                 ep_reward += reward
                 step += 1
+
+                # ── Collect reward/done for PPO ──
+                rollout_rewards.append(float(reward))
+                rollout_dones.append(1.0 if done else 0.0)
 
                 # Build telemetry payload with REAL data
                 joint_positions = env._stub_joint_pos.tolist()
@@ -192,6 +211,55 @@ async def _run_simulation_loop() -> None:
                 "spill_frac": round(env._spilled_volume / total_vol, 4),
                 "phase": env._phase.value,
             })
+
+            # ── PPO training update ──
+            if len(rollout_obs) >= 64:
+                obs_arr = np.array(rollout_obs, dtype=np.float32)
+                act_arr = np.array(rollout_actions, dtype=np.float32)
+                lp_arr = np.array(rollout_log_probs, dtype=np.float32)
+                rew_arr = np.array(rollout_rewards, dtype=np.float32)
+                val_arr = np.array(rollout_values, dtype=np.float32)
+                done_arr = np.array(rollout_dones, dtype=np.float32)
+
+                # GAE advantages
+                adv = np.zeros_like(rew_arr)
+                last_gae = 0.0
+                for t in reversed(range(len(rew_arr))):
+                    nv = val_arr[t + 1] if t < len(rew_arr) - 1 else 0.0
+                    delta = rew_arr[t] + _gamma * nv * (1 - done_arr[t]) - val_arr[t]
+                    adv[t] = last_gae = delta + _gamma * _lam * (1 - done_arr[t]) * last_gae
+                returns = adv + val_arr
+
+                batch = {
+                    "observations": obs_arr,
+                    "actions": act_arr,
+                    "old_log_probs": lp_arr,
+                    "advantages": adv,
+                    "returns": returns,
+                }
+                try:
+                    metrics = policy.train_step(batch)
+                    await _broadcast_telemetry({
+                        "type": "train_step",
+                        "episode": episode,
+                        "metrics": {k: round(float(v), 5) for k, v in metrics.items()},
+                        "avg_reward": round(float(rew_arr.mean()), 3),
+                        "ep_reward": round(ep_reward, 2),
+                    })
+                    logger.info(
+                        f"[PPO] ep={episode} "
+                        f"loss={metrics.get('total_loss', 0):.4f} "
+                        f"reward={ep_reward:.1f}"
+                    )
+                except Exception:
+                    logger.exception("PPO train_step failed")
+
+                rollout_obs.clear()
+                rollout_actions.clear()
+                rollout_log_probs.clear()
+                rollout_rewards.clear()
+                rollout_values.clear()
+                rollout_dones.clear()
 
             # Brief pause between episodes
             await asyncio.sleep(1.0)

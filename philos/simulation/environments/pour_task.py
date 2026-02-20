@@ -1,11 +1,12 @@
 """
 "The Sommelier" — Chemical-Liquid Pouring Task (WP4 T4.2).
 
-A UR5e-class 6-DoF arm on a differential-drive AMR must:
-    1. Navigate to a lab bench where a beaker of chemical liquid sits
-    2. Reach the beaker and grasp it (compliant grip)
-    3. Transport the beaker to a target glass without spilling
-    4. Tilt the wrist to pour the liquid precisely into the glass
+A UR5e-class 6-DoF arm on a differential-drive AMR carries a beaker
+of chemical liquid and must:
+    1. Drive the AMR toward a lab bench where a target glass sits
+    2. Keep the beaker upright during transit (no spill)
+    3. When in range, stop the AMR and tilt the wrist to pour
+    4. Pour the liquid precisely into the glass until done
 
 Physical robot model (UR5e-class):
     - 6 revolute joints with hard position / velocity / torque limits
@@ -15,7 +16,7 @@ Physical robot model (UR5e-class):
 
 Fluid model (simplified stub):
     - Pour rate = f(tilt_angle): zero below 15°, ramps linearly to max at 90°
-    - Spill during transport if beaker tilt > 8° and NOT over target glass
+    - Spill during transit if beaker tilt > 8°
     - Surface tension → small delay before flow starts
 
 Success criteria (PHILOS KPIs):
@@ -51,11 +52,9 @@ except ImportError:
 # ─── Task phases ──────────────────────────────────────────────────────────────
 
 class TaskPhase(str, Enum):
-    APPROACH = "approach"       # navigate base & arm toward beaker
-    GRASP = "grasp"             # close gripper on beaker
-    TRANSPORT = "transport"     # carry beaker to glass
-    POUR = "pour"               # tilt wrist → liquid flows
-    DONE = "done"               # target volume reached
+    NAVIGATE = "navigate"      # AMR drives toward glass, arm holds beaker upright
+    POUR = "pour"              # AMR stopped near glass, arm tilting to pour
+    DONE = "done"              # target volume reached
 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -72,8 +71,10 @@ class PourTaskConfig(EnvConfig):
 
     # ── Lab geometry (metres, world frame) ─────────────────
     beaker_start: tuple[float, float, float] = (0.50, 0.0, 0.85)
-    glass_position: tuple[float, float, float] = (0.50, 0.38, 0.78)
+    glass_position: tuple[float, float, float] = (0.50, 0.30, 0.78)
     bench_height: float = 0.75
+    robot_start_position: tuple[float, float, float] = (-0.5, 0.0, 0.0)
+    pour_arrive_distance: float = 0.20  # EE-to-glass XY for POUR transition
 
     # ── Robot arm — UR5e-class dimensions ──────────────────
     arm_base_height: float = 0.30              # AMR deck to shoulder
@@ -112,8 +113,8 @@ class PourTaskEnv(IsaacSimEnv):
     Observation space (56-dim):
         [joint_pos(6), ee_pos(3), base_pos(3), beaker_pos(3),
          glass_pos(3), wrist_tilt_sin, wrist_tilt_cos, grasped,
-         phase_onehot(5), fluid_in_beaker_frac, poured_frac,
-         spill_frac, ee_to_beaker_dist, ee_to_glass_dist,
+         phase_onehot(3), fluid_in_beaker_frac, poured_frac,
+         spill_frac, base_to_glass_dist, ee_to_glass_dist,
          ... padding/context(18)]
 
     Action space (10-dim):
@@ -135,8 +136,8 @@ class PourTaskEnv(IsaacSimEnv):
         # ── Task state ──
         self._poured_volume: float = 0.0
         self._spilled_volume: float = 0.0
-        self._grasped: bool = False
-        self._phase: TaskPhase = TaskPhase.APPROACH
+        self._grasped: bool = True
+        self._phase: TaskPhase = TaskPhase.NAVIGATE
         self._beaker_pos = np.array(tc.beaker_start, dtype=np.float64)
         self._glass_pos = np.array(tc.glass_position, dtype=np.float64)
         self._fluid_in_beaker: float = tc.source_volume_ml  # ml
@@ -173,20 +174,27 @@ class PourTaskEnv(IsaacSimEnv):
         self._poured_volume = 0.0
         self._spilled_volume = 0.0
         self._fluid_in_beaker = tc.source_volume_ml
-        self._grasped = False
-        self._phase = TaskPhase.APPROACH
         self._wrist_tilt_deg = 0.0
 
-        # Scene objects
-        self._beaker_pos = np.array(tc.beaker_start, dtype=np.float64)
+        # Robot starts already holding the beaker, gripper closed
+        self._grasped = True
+        self._gripper_openness = 0.0
+        self._phase = TaskPhase.NAVIGATE
+
+        # Glass on bench — the destination
         self._glass_pos = np.array(tc.glass_position, dtype=np.float64)
 
-        # Robot starts at origin, arm in home configuration
-        self._stub_base_pos = np.zeros(3, dtype=np.float64)
-        self._stub_joint_pos = np.array([0.0, -0.5, 0.8, 0.0, -0.3, 0.0],
+        # AMR starts away from the bench, drives toward the glass
+        self._stub_base_pos = np.array(tc.robot_start_position, dtype=np.float64)
+
+        # Arm in "holding beaker upright" configuration
+        # Sum j[1]+j[2]+j[4] ≈ π/2 → wrist tilt ≈ 0° (beaker upright)
+        self._stub_joint_pos = np.array([0.0, -0.3, 0.6, 0.0, 1.27, 0.0],
                                          dtype=np.float64)
-        self._gripper_openness = 1.0
         self._stub_ee_pos = self._forward_kinematics()
+
+        # Beaker starts at the end-effector
+        self._beaker_pos = self._stub_ee_pos.copy()
 
     # ──────────────────────────────────────────────────────────────────────
     # Forward kinematics  (UR5e simplified — planar arm rotated by J1)
@@ -273,10 +281,10 @@ class PourTaskEnv(IsaacSimEnv):
         obs[28] = self._spilled_volume / total            # spilled
 
         # Distance features
-        ee_to_beaker = np.linalg.norm(self._stub_ee_pos - self._beaker_pos)
-        ee_to_glass = np.linalg.norm(self._stub_ee_pos[:2] - self._glass_pos[:2])
-        obs[29] = float(ee_to_beaker)
-        obs[30] = float(ee_to_glass)
+        base_to_glass_xy = np.linalg.norm(self._stub_base_pos[:2] - self._glass_pos[:2])
+        ee_to_glass_xy = np.linalg.norm(self._stub_ee_pos[:2] - self._glass_pos[:2])
+        obs[29] = float(base_to_glass_xy)
+        obs[30] = float(ee_to_glass_xy)
 
         # Context-vector placeholder (indices 38-55)
         obs[48:51] = self._beaker_pos
@@ -296,35 +304,34 @@ class PourTaskEnv(IsaacSimEnv):
         reward = 0.0
 
         ee = self._stub_ee_pos
-        d_beaker = float(np.linalg.norm(ee - self._beaker_pos))
         d_glass_xy = float(np.linalg.norm(ee[:2] - self._glass_pos[:2]))
         poured_frac = self._poured_volume / total
         spill_frac = self._spilled_volume / total
         target_frac = tc.target_volume_ml / total
 
-        if self._phase == TaskPhase.APPROACH:
-            # Reward approach to beaker
-            reward += tc.approach_weight * max(0, 1.0 - d_beaker / 1.5)
-
-        elif self._phase == TaskPhase.GRASP:
-            # Bonus for grasping
-            reward += tc.grasp_reward
-
-        elif self._phase == TaskPhase.TRANSPORT:
-            # Reward proximity to glass
-            reward += tc.transport_weight * max(0, 1.0 - d_glass_xy / 1.0)
-            # Small penalty for tilt during transport
+        if self._phase == TaskPhase.NAVIGATE:
+            # Reward closing distance to the glass
+            reward += tc.approach_weight * max(0, 1.0 - d_glass_xy / 1.5)
+            # Bonus for keeping beaker upright during transit
+            if self._wrist_tilt_deg < 10.0:
+                reward += 0.3
+            # Penalty for tilting too much while driving
             if self._wrist_tilt_deg > tc.spill_tilt_threshold_deg:
-                reward -= 0.5
+                reward -= 1.0
 
         elif self._phase == TaskPhase.POUR:
             # Reward pour progress
             reward += tc.pour_accuracy_weight * poured_frac
+            # Bonus for staying accurately over the glass
+            if d_glass_xy < tc.pour_xy_tolerance_m:
+                reward += 1.0
+            else:
+                reward -= 2.0  # off-target
 
         # Always: spill penalty
         reward -= tc.spill_penalty_weight * spill_frac
 
-        # Smoothness
+        # Smoothness (penalize jerky actions)
         reward -= tc.smoothness_weight * float(np.sum(action ** 2)) * 0.01
 
         # Success bonus
@@ -363,8 +370,8 @@ class PourTaskEnv(IsaacSimEnv):
     def _stub_step(self, action: np.ndarray) -> None:
         """Physically realistic stub step (no Isaac Sim).
 
-        Applies UR5e joint/velocity limits, proper FK, beaker-follows-EE
-        when grasped, tilt-based pouring, spill during transport.
+        AMR carries pre-grasped beaker toward the glass.  When in pouring
+        range the AMR locks position and the arm tilts to pour.
         """
         action = np.asarray(action, dtype=np.float64)
         if action.shape[0] < 10:
@@ -373,65 +380,43 @@ class PourTaskEnv(IsaacSimEnv):
         tc = self._task_config
         dt = tc.dt  # 0.02 s
 
-        # ── 1. Base velocity (clamped) ──────────────────
-        base_lin = action[:2] * tc.base_max_linear
-        base_ang = np.clip(action[2], -1, 1) * tc.base_max_angular
-        self._stub_base_pos[0] += float(base_lin[0]) * dt
-        self._stub_base_pos[1] += float(base_lin[1]) * dt
-        # (heading stored as base_pos[2] for simplicity)
-        self._stub_base_pos[2] += float(base_ang) * dt
+        # ── 1. Base velocity — locked during POUR / DONE ──
+        if self._phase == TaskPhase.NAVIGATE:
+            base_lin = action[:2] * tc.base_max_linear
+            base_ang = np.clip(action[2], -1, 1) * tc.base_max_angular
+            self._stub_base_pos[0] += float(base_lin[0]) * dt
+            self._stub_base_pos[1] += float(base_lin[1]) * dt
+            self._stub_base_pos[2] += float(base_ang) * dt
 
-        # ── 2. Joint velocities (clamped to max) then positions (clamped) ──
+        # ── 2. Joint velocities (clamped) → positions (clamped) ──
         raw_vel = action[3:9]
         clamped_vel = np.clip(raw_vel, -self._max_jvel, self._max_jvel)
         new_joints = self._stub_joint_pos + clamped_vel * dt
         self._stub_joint_pos = np.clip(new_joints, self._joint_lo, self._joint_hi)
 
-        # ── 3. Forward kinematics ──────────────────────
+        # ── 3. Forward kinematics ──
         self._stub_ee_pos = self._forward_kinematics()
         self._wrist_tilt_deg = self._compute_wrist_tilt()
 
-        # ── 4. Gripper ──────────────────────────────────
-        gripper_cmd = float(action[9]) if len(action) > 9 else 0.0
-        self._gripper_openness = float(np.clip(1.0 - gripper_cmd, 0, 1))
+        # ── 4. Gripper stays closed (always holding beaker) ──
+        self._gripper_openness = 0.0
+        self._grasped = True
 
-        # ── 5. Grasping logic ───────────────────────────
-        if not self._grasped:
-            d = float(np.linalg.norm(self._stub_ee_pos - self._beaker_pos))
-            if d < tc.grasp_reach_m and self._gripper_openness < 0.4:
-                self._grasped = True
-                self._phase = TaskPhase.GRASP
-                logger.debug("Beaker grasped!")
-        elif self._gripper_openness > 0.7:
-            # Released
-            self._grasped = False
-            self._beaker_pos = self._stub_ee_pos.copy()
+        # ── 5. Beaker follows end-effector ──
+        self._beaker_pos = self._stub_ee_pos.copy()
 
-        # ── 6. Beaker follows EE when grasped ──────────
-        if self._grasped:
-            self._beaker_pos = self._stub_ee_pos.copy()
+        # ── 6. Phase transitions ──
+        ee_to_glass_xy = float(np.linalg.norm(
+            self._stub_ee_pos[:2] - self._glass_pos[:2]))
 
-            # Update phase
-            d_glass_xy = float(np.linalg.norm(
-                self._stub_ee_pos[:2] - self._glass_pos[:2]))
-            if d_glass_xy < tc.pour_xy_tolerance_m:
-                if self._wrist_tilt_deg > tc.pour_tilt_threshold_deg:
-                    self._phase = TaskPhase.POUR
-                else:
-                    self._phase = TaskPhase.TRANSPORT
-            elif self._phase not in (TaskPhase.POUR,):
-                self._phase = TaskPhase.TRANSPORT
+        if self._phase == TaskPhase.NAVIGATE:
+            if (ee_to_glass_xy < tc.pour_arrive_distance
+                    and self._wrist_tilt_deg > tc.pour_tilt_threshold_deg):
+                self._phase = TaskPhase.POUR
 
-        else:
-            if self._phase not in (TaskPhase.DONE,):
-                self._phase = TaskPhase.APPROACH
-
-        # ── 7. Fluid dynamics ──────────────────────────
-        if self._grasped and self._fluid_in_beaker > 0:
-            d_glass_xy = float(np.linalg.norm(
-                self._beaker_pos[:2] - self._glass_pos[:2]))
-            over_glass = d_glass_xy < tc.pour_xy_tolerance_m
-
+        # ── 7. Fluid dynamics ──
+        if self._fluid_in_beaker > 0:
+            over_glass = ee_to_glass_xy < tc.pour_xy_tolerance_m
             tilt = self._wrist_tilt_deg
 
             if tilt > tc.pour_tilt_threshold_deg:
@@ -440,25 +425,23 @@ class PourTaskEnv(IsaacSimEnv):
                     (tilt - tc.pour_tilt_threshold_deg)
                     / (90.0 - tc.pour_tilt_threshold_deg))
                 flow_ml = tc.pour_rate_max_ml_per_step * tilt_frac
-
                 flow_ml = min(flow_ml, self._fluid_in_beaker)
                 self._fluid_in_beaker -= flow_ml
 
                 if over_glass:
-                    self._poured_volume += flow_ml * 0.97  # 3 % splash loss
+                    self._poured_volume += flow_ml * 0.97  # 3% splash
                     self._spilled_volume += flow_ml * 0.03
                 else:
-                    # Pouring but not over glass → all spills
                     self._spilled_volume += flow_ml
 
             elif tilt > tc.spill_tilt_threshold_deg:
-                # Slight tilt during transport — small drip
+                # Slight tilt during navigation — small drip
                 drip = 0.02 * (tilt - tc.spill_tilt_threshold_deg) / 10.0
                 drip = min(drip, self._fluid_in_beaker)
                 self._fluid_in_beaker -= drip
                 self._spilled_volume += drip
 
-        # ── 8. Cap volumes ─────────────────────────────
+        # ── 8. Cap volumes ──
         total = tc.source_volume_ml
         self._poured_volume = float(np.clip(self._poured_volume, 0, total))
         self._spilled_volume = float(np.clip(self._spilled_volume, 0, total))

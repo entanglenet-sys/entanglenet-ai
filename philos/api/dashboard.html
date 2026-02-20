@@ -184,6 +184,21 @@
     </div>
   </div>
 
+  <!-- Online PPO Learning -->
+  <div class="card">
+    <h2><span class="dot" id="learnDot"></span> Online PPO Learning</h2>
+    <div class="sim-stats">
+      <div class="stat"><div class="val" id="trainStep">0</div><div class="lbl">Train Steps</div></div>
+      <div class="stat"><div class="val" id="policyLoss">&mdash;</div><div class="lbl">Policy Loss</div></div>
+      <div class="stat"><div class="val" id="valueLoss">&mdash;</div><div class="lbl">Value Loss</div></div>
+      <div class="stat"><div class="val" id="entropy">&mdash;</div><div class="lbl">Entropy</div></div>
+    </div>
+    <div style="margin-top:10px">
+      <div class="progress-label"><span>Episode Reward Trend</span><span id="avgReward">&mdash;</span></div>
+      <canvas id="rewardChart" style="width:100%;height:55px;background:var(--bg);border-radius:6px;margin-top:4px"></canvas>
+    </div>
+  </div>
+
   <!-- System Health + Live Joint/Action bars -->
   <div class="card">
     <h2><span class="dot"></span> System Health</h2>
@@ -227,20 +242,23 @@ const SIM = {
   connected: false,
   joints: [0,0,0,0,0,0],
   eePos: [0,0,0.5],
-  basePos: [0,0,0],
-  gripper: 0.5,
+  basePos: [-0.5,0,0],
+  gripper: 0,
   action: new Array(10).fill(0),
   episode: 0, step: 0,
   reward: 0, epReward: 0, value: 0,
   pouredFrac: 0, spillFrac: 0,
   done: false, safetyOk: true,
-  // ── New physical state ──
-  phase: 'approach',
+  // ── Physical state ──
+  phase: 'navigate',
   beakerPos: [0.5, 0.0, 0.85],
-  glassPos: [0.5, 0.38, 0.78],
+  glassPos: [0.5, 0.30, 0.78],
   beakerTiltDeg: 0,
   fluidInBeaker: 250,
-  grasped: false,
+  grasped: true,
+  // ── Learning state ──
+  trainStep: 0, policyLoss: 0, valueLoss: 0, entropy: 0,
+  rewardHistory: [],
 };
 
 /* ─── Starfield ────────────────────────────────────────────────────────── */
@@ -272,7 +290,7 @@ const SIM = {
 
   function draw(){
     ctx.clearRect(0,0,W,H);
-    const bx=W*0.30, by=H*0.88;
+    const bx=W*0.50, by=H*0.88;
 
     // ── Lab bench surface ──
     const benchY = H*0.70;
@@ -292,7 +310,7 @@ const SIM = {
     for(let i=H*0.88;i<H;i+=15){ctx.beginPath();ctx.moveTo(0,i);ctx.lineTo(W,i);ctx.stroke()}
 
     // AMR base offset by real base position
-    const baseOff=SIM.basePos[0]*120;
+    const baseOff=SIM.basePos[0]*(W*0.45);
     const abx=bx+baseOff;
     ctx.fillStyle='#1a2a3a';ctx.strokeStyle='#00e5ff';ctx.lineWidth=2;
     roundRect(ctx,abx-42,by-8,84,20,6);
@@ -322,18 +340,10 @@ const SIM = {
     ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle-grip)*15,y+Math.sin(cumAngle-grip)*15);ctx.stroke();
     ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle+grip)*15,y+Math.sin(cumAngle+grip)*15);ctx.stroke();
 
-    // ── Beaker ──
-    const bkW = 16, bkH = 28; // beaker dimensions (px)
-    let bkx, bky, bkTilt;
-    if (SIM.grasped) {
-      // Beaker follows EE
-      bkx = x; bky = y + 8;
-      bkTilt = cumAngle + Math.PI/2; // tilt from cumulative arm angle
-    } else {
-      // Beaker on the bench
-      bkx = W*0.62; bky = benchY - 1;
-      bkTilt = 0;
-    }
+    // ── Beaker ── (always at arm end-effector)
+    const bkW = 16, bkH = 28;
+    let bkx = x, bky = y + 8;
+    let bkTilt = cumAngle + Math.PI/2;
 
     ctx.save();
     ctx.translate(bkx, bky);
@@ -366,11 +376,9 @@ const SIM = {
 
     ctx.restore();
 
-    // Beaker label
-    if (!SIM.grasped) {
-      ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#80cbc4';
-      ctx.fillText('Beaker ('+Math.round(SIM.fluidInBeaker)+' ml)', bkx-28, bky+14);
-    }
+    // Beaker label (at arm tip)
+    ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#80cbc4';
+    ctx.fillText(Math.round(SIM.fluidInBeaker)+' ml', x+15, y-5);
 
     // ── Target Glass ──
     const gx=W*0.78, gy=benchY-1;
@@ -411,14 +419,14 @@ const SIM = {
     }
 
     // ── Pour stream (liquid flowing from beaker to glass) ──
-    if(SIM.grasped && SIM.phase==='pour' && SIM.fluidInBeaker>0){
+    if(SIM.phase==='pour' && SIM.fluidInBeaker>0){
       // Create cyan droplets from beaker to glass
       if(Math.random()<0.7){
         particles.push({x:bkx+(Math.random()-.5)*6, y:bky+bkH*0.3, vx:(gx-bkx)*0.012+(Math.random()-.5)*0.5, vy:1.5+Math.random()*2, life:45, type:'pour'});
       }
     }
-    // Spill particles during transport tilt
-    if(SIM.grasped && SIM.phase==='transport' && SIM.beakerTiltDeg>8){
+    // Spill particles during navigation tilt
+    if(SIM.phase==='navigate' && SIM.beakerTiltDeg>8){
       if(Math.random()<0.3){
         particles.push({x:bkx+(Math.random()-.5)*8, y:bky, vx:(Math.random()-.5)*2, vy:1+Math.random(), life:30, type:'spill'});
       }
@@ -449,7 +457,7 @@ const SIM = {
     ctx.lineWidth=1;ctx.beginPath();ctx.arc(abx,by-30,150,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
 
     // ── Tilt indicator (arc near EE) ──
-    if(SIM.grasped){
+    {
       const tiltRad = SIM.beakerTiltDeg * Math.PI / 180;
       ctx.strokeStyle = SIM.beakerTiltDeg > 15 ? 'rgba(0,229,255,0.6)' : 'rgba(255,145,0,0.4)';
       ctx.lineWidth = 2;
@@ -463,12 +471,12 @@ const SIM = {
     // Labels
     ctx.font='9px "Segoe UI",system-ui';ctx.fillStyle='#546e7a';
     ctx.fillText('AMR Base',abx-22,by+28);
-    ctx.fillText('6-DoF UR5e-class',abx-30,by-90);
+    ctx.fillText('6-DoF UR5e (carrying beaker)',abx-40,by-90);
     ctx.fillStyle=SIM.safetyOk?'rgba(0,230,118,0.6)':'rgba(255,23,68,0.8)';
     ctx.fillText(SIM.safetyOk?'Safety: OK':'SAFETY OVERRIDE!',abx+95,by-140);
 
     // Phase label
-    const phaseColors = {approach:'#ff9100', grasp:'#e040fb', transport:'#7c4dff', pour:'#00e5ff', done:'#00e676'};
+    const phaseColors = {navigate:'#ff9100', pour:'#00e5ff', done:'#00e676'};
     ctx.font='bold 11px "Segoe UI",system-ui';
     ctx.fillStyle = phaseColors[SIM.phase] || '#546e7a';
     ctx.fillText('Phase: ' + SIM.phase.toUpperCase(), W*0.02, 18);
@@ -594,7 +602,27 @@ function connectWS(){
     } else if(d.type==='sim_episode_start'){
       addTelemetry('ep',`\u2501\u2501 Episode ${d.episode} started \u2501\u2501`);
     } else if(d.type==='sim_episode_end'){
+      SIM.rewardHistory.push(d.total_reward);
+      if(SIM.rewardHistory.length>200) SIM.rewardHistory.shift();
+      const el=document.getElementById('avgReward');
+      if(el)el.textContent=d.total_reward.toFixed(1);
+      drawRewardChart();
       addTelemetry('ep',`Episode ${d.episode} done: reward=${d.total_reward} steps=${d.steps} poured=${(d.poured_frac*100).toFixed(1)}% spilled=${(d.spill_frac*100).toFixed(2)}% phase=${(d.phase||'?').toUpperCase()}`);
+    } else if(d.type==='train_step'){
+      SIM.trainStep=d.metrics?.step||SIM.trainStep;
+      SIM.policyLoss=d.metrics?.policy_loss;
+      SIM.valueLoss=d.metrics?.value_loss;
+      SIM.entropy=d.metrics?.entropy;
+      const ts=document.getElementById('trainStep');
+      if(ts)ts.textContent=SIM.trainStep;
+      const pl=document.getElementById('policyLoss');
+      if(pl)pl.textContent=(SIM.policyLoss||0).toFixed(4);
+      const vl=document.getElementById('valueLoss');
+      if(vl)vl.textContent=(SIM.valueLoss||0).toFixed(4);
+      const en=document.getElementById('entropy');
+      if(en)en.textContent=(SIM.entropy||0).toFixed(3);
+      blinkDot('learnDot','#00e676');
+      addTelemetry('sim',`PPO #${SIM.trainStep}: policy=${(d.metrics?.policy_loss||0).toFixed(4)} value=${(d.metrics?.value_loss||0).toFixed(4)} ent=${(d.metrics?.entropy||0).toFixed(3)} avg_r=${(d.avg_reward||0).toFixed(2)}`);
     } else if(d.type==='context_update'){
       addTelemetry('ctx','Context vector z updated: mode='+(d.data?.manipulation_mode||'?'));
     } else {
@@ -656,6 +684,42 @@ function addTelemetry(tag,msg){
   tf.prepend(l);tc++;if(tc>400)tf.removeChild(tf.lastChild);
 }
 addTelemetry('sim','Dashboard loaded \u2014 connecting to live backend simulation...');
+
+/* ─── Reward sparkline chart ───────────────────────────────────────────── */
+function drawRewardChart(){
+  const canvas=document.getElementById('rewardChart');
+  if(!canvas||SIM.rewardHistory.length<2)return;
+  const ctx2=canvas.getContext('2d');
+  const W2=canvas.width=canvas.offsetWidth*devicePixelRatio;
+  const H2=canvas.height=canvas.offsetHeight*devicePixelRatio;
+  ctx2.scale(devicePixelRatio,devicePixelRatio);
+  const w=canvas.offsetWidth,h=canvas.offsetHeight;
+  ctx2.clearRect(0,0,w,h);
+  const data=SIM.rewardHistory.slice(-100);
+  const mn=Math.min(...data),mx=Math.max(...data);
+  const rng=mx-mn||1;
+  // Fill area
+  ctx2.beginPath();
+  for(let i=0;i<data.length;i++){
+    const px=(i/(data.length-1))*w;
+    const py=h-((data[i]-mn)/rng)*(h-6)-3;
+    if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);
+  }
+  ctx2.lineTo(w,h);ctx2.lineTo(0,h);ctx2.closePath();
+  ctx2.fillStyle='rgba(0,229,255,0.08)';ctx2.fill();
+  // Stroke line
+  ctx2.beginPath();
+  for(let i=0;i<data.length;i++){
+    const px=(i/(data.length-1))*w;
+    const py=h-((data[i]-mn)/rng)*(h-6)-3;
+    if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);
+  }
+  ctx2.strokeStyle='#00e5ff';ctx2.lineWidth=1.5;ctx2.stroke();
+  // Latest value dot
+  const lastY=h-((data[data.length-1]-mn)/rng)*(h-6)-3;
+  ctx2.beginPath();ctx2.arc(w,lastY,3,0,Math.PI*2);
+  ctx2.fillStyle='#00e5ff';ctx2.fill();
+}
 
 function highlightNode(n){
   const d={lang:'Language Command \u2192 operator instruction \u2192 VLM.',vlm:'Cognitive Engine \u2192 LLaVA-Next VLM for semantic grounding.',ctx:'Context Vector z \u2192 267-dim embedding conditioning \u03c0(s,z).'};
