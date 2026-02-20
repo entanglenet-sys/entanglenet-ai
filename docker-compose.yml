@@ -1,0 +1,51 @@
+# PHILOS Docker Compose — full stack
+version: "3.8"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./configs:/app/configs
+      - ./checkpoints:/app/checkpoints
+      - ./results:/app/results
+    environment:
+      - PHILOS_CONFIG=/app/configs/default.yaml
+    command: python scripts/launch_api.py --host 0.0.0.0 --port 8000
+
+  training:
+    build: .
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./configs:/app/configs
+      - ./checkpoints:/app/checkpoints
+      - ./results:/app/results
+    command: >
+      python scripts/train_rl.py
+        --env pour_task
+        --num-envs 64
+        --total-timesteps 10000000
+        --checkpoint-dir /app/checkpoints
+    profiles:
+      - training
+
+  evaluation:
+    build: .
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./results:/app/results
+    command: >
+      python scripts/evaluate.py
+        --checkpoint /app/checkpoints/best_policy.pt
+        --env pour_task
+        --episodes 100
+        --output /app/results/evaluation.json
+    profiles:
+      - evaluation

@@ -1,0 +1,53 @@
+# ============================================================
+# PHILOS — RL Training Configuration
+# ============================================================
+
+# Base defaults
+defaults:
+  - ../default
+
+# Override for training
+learning:
+  algorithm: "ppo"
+  policy: "whole_body_ppo"
+  total_timesteps: 10_000_000
+  lr: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coeff: 0.01
+  batch_size: 2048
+  mini_batch_size: 64
+  num_epochs: 10
+
+  # Curriculum learning schedule
+  curriculum:
+    enabled: true
+    stages:
+      - name: "reach"
+        timesteps: 1_000_000
+        reward_components: ["position_error", "velocity_penalty"]
+      - name: "grasp"
+        timesteps: 2_000_000
+        reward_components: ["position_error", "velocity_penalty", "grip_stability"]
+      - name: "transport"
+        timesteps: 3_000_000
+        reward_components: ["position_error", "velocity_penalty", "grip_stability", "spill_penalty", "fluid_stability"]
+      - name: "pour"
+        timesteps: 4_000_000
+        reward_components: "all"
+
+  # Checkpoint
+  save_interval: 100_000
+  checkpoint_dir: "checkpoints/"
+  best_model_metric: "mean_reward"
+
+simulation:
+  num_envs: 64
+  domain_randomization: true
+  render: false
+
+wandb:
+  enabled: true
+  project: "philos"
+  tags: ["ppo", "whole_body", "philos"]

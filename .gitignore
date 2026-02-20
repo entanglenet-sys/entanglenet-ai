@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project outputs
+checkpoints/
+results/
+logs/
+wandb/
+*.pt
+*.pth
+*.onnx
+
+# Isaac Sim
+_isaac_sim/
+*.usd
+*.usda
+*.usdc
+!configs/**
+
+# Data
+*.hdf5
+*.pkl
+*.npy
+*.npz
+data/
+
+# Secrets
+.env
+*.key

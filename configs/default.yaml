@@ -1,0 +1,120 @@
+# ============================================================
+# PHILOS — Default Configuration
+# PHysical IntelLigence, Learning, Optimization, and Semantics
+# ============================================================
+
+simulation:
+  backend: "isaac_sim"          # isaac_sim | mujoco | stub
+  num_envs: 64                  # Parallel environments for RL
+  physics_dt: 0.004167          # 1/240 s PhysX substep
+  render: false
+  use_gpu: true
+  domain_randomization: true
+  dr_seed: 42
+
+perception:
+  system1_model: "yolo_world"   # 50 Hz real-time detector
+  system1_confidence: 0.3
+  system1_classes:
+    - "beaker"
+    - "flask"
+    - "bottle"
+    - "container"
+    - "liquid"
+    - "spill"
+    - "obstacle"
+    - "shelf"
+    - "table"
+    - "person"
+    - "glove"
+    - "chemical_label"
+
+  system2_model: "llava_next"   # 1 Hz VLM grounding
+  system2_interval: 1.0         # seconds
+  context_dim: 18
+
+  sensor_fusion:
+    enable_depth: true
+    enable_lidar: true
+    voxel_size: 0.02            # metres
+
+cognitive:
+  reward_shaping: true
+  language_reward_rules:
+    careful: "compliant"
+    pour: "fluid"
+    fast: "relax"
+    precise: "precision"
+    hazard: "safety"
+    avoid: "distance"
+    steady: "fluid"
+    grip: "stiff"
+
+learning:
+  algorithm: "ppo"              # ppo | sac
+  policy: "whole_body_ppo"
+  lr: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coeff: 0.01
+  value_coeff: 0.5
+  max_grad_norm: 0.5
+  batch_size: 2048
+  mini_batch_size: 64
+  num_epochs: 10
+  total_timesteps: 10_000_000
+
+  # Network architecture
+  hidden_dims: [512, 256, 128]
+  activation: "elu"
+  use_layer_norm: true
+
+  # Context conditioning
+  context_dim: 18
+  state_dim: 30
+
+  # Domain randomization for RL
+  dr_range: 2.0                 # ±200% variation
+
+control:
+  safety_shield:
+    enabled: true               # NEVER disable in production
+    max_tilt_deg: 10.0
+    max_ee_velocity: 1.5        # m/s
+    max_base_linear: 1.0        # m/s
+    max_base_angular: 1.5       # rad/s
+    min_collision_distance: 0.05
+
+  mpc:
+    horizon: 10
+    dt: 0.02
+    max_iterations: 5
+
+  trajectory:
+    n_dof: 6
+    max_velocity: [2.175, 2.175, 2.175, 3.49, 3.49, 3.49]
+    max_acceleration: [5.0, 5.0, 5.0, 10.0, 10.0, 10.0]
+
+ros2:
+  enabled: false                # Set true for real hardware
+  node_name: "philos_bridge"
+  control_frequency: 50         # Hz
+  use_sim_time: true
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8080"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+wandb:
+  enabled: false
+  project: "philos"
+  entity: "entanglenet"

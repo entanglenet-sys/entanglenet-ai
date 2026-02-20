@@ -1,0 +1,45 @@
+# ============================================================
+# PHILOS — Safety Constraints Configuration
+# ============================================================
+# WARNING: Modifying these values can compromise robot safety.
+# All values are hard limits enforced by the deterministic shield.
+
+safety_shield:
+  enabled: true         # NEVER set to false on real hardware
+
+  # Platform stability
+  max_tilt_deg: 10.0           # KPI: platform tilt < 10°
+  max_tilt_rate_deg_s: 30.0
+
+  # End-effector limits
+  max_ee_velocity: 1.5         # m/s — KPI
+  max_ee_acceleration: 5.0     # m/s²
+
+  # Joint limits (6-DoF arm)
+  joint_position_limits:
+    - [-2.87, 2.87]    # J1
+    - [-1.76, 1.76]    # J2
+    - [-2.87, 2.87]    # J3
+    - [-3.07, 3.07]    # J4
+    - [-2.87, 2.87]    # J5
+    - [-6.28, 6.28]    # J6 (wrist)
+  max_joint_velocity: [2.175, 2.175, 2.175, 3.49, 3.49, 3.49]
+  max_joint_torque: [87.0, 87.0, 87.0, 12.0, 12.0, 12.0]
+
+  # AMR base limits
+  max_base_linear_velocity: 1.0   # m/s
+  max_base_angular_velocity: 1.5  # rad/s
+
+  # Collision avoidance
+  min_collision_distance: 0.05    # metres
+  safety_margin: 0.10             # metres (buffer zone)
+
+  # Gripper
+  max_grip_force: 40.0            # N
+
+  # Jerk limits
+  max_joint_jerk: 500.0           # rad/s³
+
+  # Emergency stop
+  e_stop_deceleration: 10.0       # rad/s² (for soft stop)
+  e_stop_latency_budget_ms: 50    # KPI: < 50 ms

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "philos"
+version = "0.1.0"
+description = "PHILOS — PHysical IntelLigence, Learning, Optimization, and Semantics: A Foundation Model for Adaptive Mobile Manipulation"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Entanglenet GmbH", email = "office@entanglenet.ai"},
+]
+keywords = ["physical-ai", "reinforcement-learning", "robotics", "isaac-sim", "vlm", "ros2"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Robotics",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.1",
+    "gymnasium>=0.29",
+    "fastapi>=0.104",
+    "uvicorn[standard]>=0.24",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "httpx>=0.25",
+    "omegaconf>=2.3",
+    "tensorboard>=2.15",
+    "wandb>=0.16",
+]
+
+[project.optional-dependencies]
+isaac-sim = [
+    "isaacsim>=4.0",
+    "omni-isaac-lab>=1.0",
+]
+perception = [
+    "ultralytics>=8.1",
+    "transformers>=4.36",
+    "opencv-python>=4.8",
+    "open3d>=0.18",
+]
+ros2 = [
+    # ROS2 packages installed via apt/colcon, not pip
+    # Listed here for documentation purposes
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "mypy>=1.7",
+    "pre-commit>=3.6",
+]
+all = [
+    "philos[perception,dev]",
+]
+
+[project.scripts]
+philos-api = "philos.api.server:main"
+philos-train = "scripts.train_rl:main"
+philos-eval = "scripts.evaluate:main"
+philos-sim = "scripts.launch_sim:main"
+
+[project.urls]
+Homepage = "https://entanglenet.ai"
+Repository = "https://github.com/entanglenet/philos"
+Documentation = "https://github.com/entanglenet/philos/tree/main/docs"
+
+[tool.setuptools.packages.find]
+include = ["philos*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
