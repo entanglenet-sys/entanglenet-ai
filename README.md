@@ -8,6 +8,10 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![NVIDIA Isaac Sim](https://img.shields.io/badge/NVIDIA-Isaac%20Sim-76B900.svg)](https://developer.nvidia.com/isaac-sim)
 
+<p align="center">
+  <img src="pic.png" alt="PHILOS Architecture" width="720">
+</p>
+
 ---
 
 ## Overview
