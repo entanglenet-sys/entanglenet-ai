@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PHILOS — Physical Intelligence Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.0/examples/js/controls/OrbitControls.js"></script>
 <style>
   :root {
     --bg: #0a0e17; --bg2: #111827; --bg3: #1a2235;
@@ -46,7 +48,8 @@
   .flow-line { stroke-dasharray: 8 4; animation: dash 1.5s linear infinite; }
   @keyframes dash { to { stroke-dashoffset: -24; } }
 
-  #armCanvas { width: 100%; height: 320px; border-radius: 8px; background: radial-gradient(ellipse at center bottom, #0d1520 0%, #080c14 100%); }
+  #twin3d { width: 100%; height: 480px; border-radius: 8px; overflow: hidden; position: relative; }
+  #twin3d canvas { display: block; width: 100%; height: 100%; }
 
   .sim-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
   .stat { text-align: center; padding: 10px 6px; background: var(--bg3); border-radius: 8px; }
@@ -160,10 +163,10 @@
     </svg>
   </div>
 
-  <!-- Robot Arm (driven by real WebSocket data) -->
-  <div class="card">
-    <h2><span class="dot" id="simDot"></span> Live Simulation — Pour Task</h2>
-    <canvas id="armCanvas"></canvas>
+  <!-- 3D Digital Twin (full-width) -->
+  <div class="card full-span">
+    <h2><span class="dot" id="simDot"></span> 3D Digital Twin — UR5e Pour Task (URDF-driven, 1:1)</h2>
+    <div id="twin3d"></div>
     <div class="sim-stats">
       <div class="stat"><div class="val" id="simEpisode">&mdash;</div><div class="lbl">Episode</div></div>
       <div class="stat"><div class="val" id="simStep">&mdash;</div><div class="lbl">Step</div></div>
@@ -171,7 +174,7 @@
       <div class="stat"><div class="val" id="simValue">&mdash;</div><div class="lbl">Value V(s)</div></div>
     </div>
     <div class="sim-stats" style="margin-top:8px">
-      <div class="stat"><div class="val" id="simPhase" style="font-size:0.9rem">APPROACH</div><div class="lbl">Task Phase</div></div>
+      <div class="stat"><div class="val" id="simPhase" style="font-size:0.9rem">REACH</div><div class="lbl">Task Phase</div></div>
       <div class="stat"><div class="val" id="simTilt">0&deg;</div><div class="lbl">Beaker Tilt</div></div>
       <div class="stat"><div class="val" id="simFluid">250</div><div class="lbl">Fluid ml</div></div>
       <div class="stat"><div class="val" id="simGrasped" style="font-size:0.9rem">&mdash;</div><div class="lbl">Grasped</div></div>
@@ -184,7 +187,7 @@
     </div>
   </div>
 
-  <!-- Online PPO Learning -->
+  <!-- Online PPO Learning — enhanced with visible progress -->
   <div class="card">
     <h2><span class="dot" id="learnDot"></span> Online PPO Learning</h2>
     <div class="sim-stats">
@@ -193,9 +196,15 @@
       <div class="stat"><div class="val" id="valueLoss">&mdash;</div><div class="lbl">Value Loss</div></div>
       <div class="stat"><div class="val" id="entropy">&mdash;</div><div class="lbl">Entropy</div></div>
     </div>
+    <div class="sim-stats" style="margin-top:8px">
+      <div class="stat"><div class="val" id="bestReward">&mdash;</div><div class="lbl">Best Ep Reward</div></div>
+      <div class="stat"><div class="val" id="avgReward20">&mdash;</div><div class="lbl">Avg (20 ep)</div></div>
+      <div class="stat"><div class="val" id="totalEpisodes">0</div><div class="lbl">Total Episodes</div></div>
+      <div class="stat"><div class="val" id="learningTrend" style="font-size:0.9rem">&mdash;</div><div class="lbl">Trend</div></div>
+    </div>
     <div style="margin-top:10px">
-      <div class="progress-label"><span>Episode Reward Trend</span><span id="avgReward">&mdash;</span></div>
-      <canvas id="rewardChart" style="width:100%;height:55px;background:var(--bg);border-radius:6px;margin-top:4px"></canvas>
+      <div class="progress-label"><span>Episode Reward History</span><span id="avgReward">&mdash;</span></div>
+      <canvas id="rewardChart" style="width:100%;height:80px;background:var(--bg);border-radius:6px;margin-top:4px"></canvas>
     </div>
   </div>
 
@@ -242,23 +251,27 @@ const SIM = {
   connected: false,
   joints: [0,0,0,0,0,0],
   eePos: [0,0,0.5],
-  basePos: [-0.5,0,0],
+  basePos: [0,0,0],
   gripper: 0,
-  action: new Array(10).fill(0),
+  action: new Array(7).fill(0),
   episode: 0, step: 0,
   reward: 0, epReward: 0, value: 0,
   pouredFrac: 0, spillFrac: 0,
   done: false, safetyOk: true,
-  // ── Physical state ──
-  phase: 'navigate',
+  // Physical state
+  phase: 'reach',
   beakerPos: [0.5, 0.0, 0.85],
-  glassPos: [0.5, 0.30, 0.78],
+  glassPos: [0.45, 0.25, 0.78],
   beakerTiltDeg: 0,
   fluidInBeaker: 250,
   grasped: true,
-  // ── Learning state ──
+  collision: false,
+  // Learning state
   trainStep: 0, policyLoss: 0, valueLoss: 0, entropy: 0,
   rewardHistory: [],
+  bestReward: -Infinity,
+  avgReward20: 0,
+  totalEpisodes: 0,
 };
 
 /* ─── Starfield ────────────────────────────────────────────────────────── */
@@ -270,237 +283,396 @@ const SIM = {
   !function d(){x.clearRect(0,0,c.width,c.height);for(const p of s){p.a+=(Math.random()-.5)*.02;p.a=Math.max(.1,Math.min(1,p.a));p.y+=p.sp;if(p.y>c.height){p.y=0;p.x=Math.random()*c.width}x.beginPath();x.arc(p.x,p.y,p.r,0,Math.PI*2);x.fillStyle=`rgba(180,210,255,${p.a*.5})`;x.fill()}requestAnimationFrame(d)}();
 })();
 
-/* ─── Robot Arm Canvas (renders from SIM state) ────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════════
+   3D Digital Twin — URDF-driven UR5e on fixed pedestal
+   Fetches URDF JSON from /api/v1/urdf and builds the scene from it.
+   This guarantees the 3D visualization is a 1:1 match with the simulation.
+   ═══════════════════════════════════════════════════════════════════════════ */
 (function(){
-  const canvas=document.getElementById('armCanvas'),ctx=canvas.getContext('2d');
-  let W,H;
-  function resize(){const r=canvas.getBoundingClientRect();canvas.width=r.width*devicePixelRatio;canvas.height=r.height*devicePixelRatio;ctx.scale(devicePixelRatio,devicePixelRatio);W=r.width;H=r.height}
-  resize();addEventListener('resize',resize);
+  const container = document.getElementById('twin3d');
+  if(!container) return;
 
-  const segColors=['#00e5ff','#7c4dff','#00e676','#ff9100','#00e5ff','#e040fb'];
-  const segLens=[75,60,48,38,28,22];
-  const segWidths=[15,12,10,8,6,4];
-  const segBase=[-Math.PI/2, -0.3, 0.2, 0.4, -0.1, 0.0];
+  const BENCH_H = 0.75;
+  const GLASS_POS_DEFAULT = [0.45, 0.25, 0.78];
 
-  // Fluid particles array
-  let particles = [];
-  const CHEM_COLOR = 'rgba(0,200,255,0.7)';
-  const CHEM_COLOR2 = 'rgba(0,180,240,0.55)';
-  const SPILL_COLOR = 'rgba(255,80,80,0.5)';
+  /* ── Renderer ────────────────────────────────────────────────────────── */
+  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
+  renderer.setClearColor(0x080c14, 1);
+  container.appendChild(renderer.domElement);
 
-  function draw(){
-    ctx.clearRect(0,0,W,H);
-    const bx=W*0.50, by=H*0.88;
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x080c14, 0.25);
 
-    // ── Lab bench surface ──
-    const benchY = H*0.70;
-    ctx.fillStyle='#2a1f14';
-    ctx.fillRect(W*0.50, benchY, W*0.48, 8);
-    ctx.fillStyle='#3b2a1a';
-    ctx.fillRect(W*0.50, benchY+8, W*0.48, 4);
-    ctx.fillStyle='#1a1210';
-    ctx.fillRect(W*0.58, benchY+12, 6, H-benchY-12);
-    ctx.fillRect(W*0.88, benchY+12, 6, H-benchY-12);
-    ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#5a4a3a';
-    ctx.fillText('Lab Bench', W*0.66, benchY-3);
+  const camera = new THREE.PerspectiveCamera(45, 2, 0.05, 50);
+  camera.position.set(1.4, 1.6, 1.6);
+  camera.lookAt(0.2, 0.6, 0.1);
 
-    // Grid floor
-    ctx.strokeStyle='#1a2235';ctx.lineWidth=0.5;
-    for(let i=0;i<W;i+=30){ctx.beginPath();ctx.moveTo(i,H*.88);ctx.lineTo(i,H);ctx.stroke()}
-    for(let i=H*0.88;i<H;i+=15){ctx.beginPath();ctx.moveTo(0,i);ctx.lineTo(W,i);ctx.stroke()}
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0.2, 0.6, 0.1);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 0.5;
+  controls.maxDistance = 5;
+  controls.update();
 
-    // AMR base offset by real base position
-    const baseOff=SIM.basePos[0]*(W*0.45);
-    const abx=bx+baseOff;
-    ctx.fillStyle='#1a2a3a';ctx.strokeStyle='#00e5ff';ctx.lineWidth=2;
-    roundRect(ctx,abx-42,by-8,84,20,6);
-    ctx.fillStyle='#37474f';ctx.fillRect(abx-40,by+10,18,8);ctx.fillRect(abx+22,by+10,18,8);
+  /* ── Lighting ────────────────────────────────────────────────────────── */
+  scene.add(new THREE.AmbientLight(0x404860, 0.6));
+  scene.add(new THREE.HemisphereLight(0x8090b0, 0x101820, 0.4));
+  const keyLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+  keyLight.position.set(2, 4, 3);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(1024, 1024);
+  keyLight.shadow.camera.near = 0.5; keyLight.shadow.camera.far = 12;
+  keyLight.shadow.camera.left = -3; keyLight.shadow.camera.right = 3;
+  keyLight.shadow.camera.top = 3; keyLight.shadow.camera.bottom = -3;
+  scene.add(keyLight);
+  scene.add(new THREE.DirectionalLight(0x6090ff, 0.3).translateX(-2).translateY(2).translateZ(-1));
+  const rimLight = new THREE.PointLight(0x00e5ff, 0.4, 6);
+  rimLight.position.set(-1, 2, 2); scene.add(rimLight);
 
-    // Draw arm with REAL joint angles
-    let x=abx, y=by-8, cumAngle=0;
-    for(let i=0;i<6;i++){
-      const jAngle=segBase[i]+SIM.joints[i];
-      cumAngle+=jAngle;
-      const nx=x+Math.cos(cumAngle)*segLens[i];
-      const ny=y+Math.sin(cumAngle)*segLens[i];
-      ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(nx,ny);
-      ctx.strokeStyle=segColors[i];ctx.lineWidth=segWidths[i];ctx.lineCap='round';ctx.stroke();
-      ctx.beginPath();ctx.arc(x,y,segWidths[i]*.55,0,Math.PI*2);
-      ctx.fillStyle='#1a2a3a';ctx.fill();ctx.strokeStyle=segColors[i];ctx.lineWidth=2;ctx.stroke();
-      x=nx;y=ny;
-    }
+  /* ── Materials ───────────────────────────────────────────────────────── */
+  const matFloor = new THREE.MeshStandardMaterial({ color:0x1a1e28, roughness:0.8, metalness:0.2 });
+  const matBench = new THREE.MeshStandardMaterial({ color:0x5a4030, roughness:0.6, metalness:0.1 });
+  const matBenchLeg = new THREE.MeshStandardMaterial({ color:0x3a2a1a, roughness:0.7, metalness:0.2 });
+  const matGlass = new THREE.MeshPhysicalMaterial({ color:0xaaddff, roughness:0.05, metalness:0.0, transmission:0.85, thickness:0.5, transparent:true, opacity:0.3 });
+  const matFluidGlass = new THREE.MeshStandardMaterial({ color:0x00aadd, roughness:0.2, metalness:0.1, transparent:true, opacity:0.6, emissive:0x003355, emissiveIntensity:0.3 });
+  const matFluid = new THREE.MeshStandardMaterial({ color:0x00ccff, roughness:0.2, metalness:0.1, transparent:true, opacity:0.7, emissive:0x004466, emissiveIntensity:0.4 });
+  const matJoint = new THREE.MeshStandardMaterial({ color:0x556070, roughness:0.2, metalness:0.9 });
+  const matGripper = new THREE.MeshStandardMaterial({ color:0xcc44ff, roughness:0.3, metalness:0.7, emissive:0x330066, emissiveIntensity:0.4 });
+  const matBeaker = new THREE.MeshPhysicalMaterial({ color:0xcceeFF, roughness:0.05, metalness:0.0, transmission:0.8, thickness:0.5, transparent:true, opacity:0.35, side:THREE.DoubleSide });
 
-    // End-effector glow
-    ctx.beginPath();ctx.arc(x,y,6,0,Math.PI*2);
-    ctx.fillStyle='#e040fb';ctx.shadowColor='#e040fb';ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
-
-    // Gripper
-    const grip=(1.0-SIM.gripper)*0.5+0.1;
-    ctx.strokeStyle='#e040fb';ctx.lineWidth=3;
-    ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle-grip)*15,y+Math.sin(cumAngle-grip)*15);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(cumAngle+grip)*15,y+Math.sin(cumAngle+grip)*15);ctx.stroke();
-
-    // ── Beaker ── (always at arm end-effector)
-    const bkW = 16, bkH = 28;
-    let bkx = x, bky = y + 8;
-    let bkTilt = cumAngle + Math.PI/2;
-
-    ctx.save();
-    ctx.translate(bkx, bky);
-    ctx.rotate(bkTilt);
-
-    // Beaker body (trapezoid outline)
-    ctx.strokeStyle='rgba(200,230,255,0.6)';ctx.lineWidth=1.5;
-    ctx.beginPath();
-    ctx.moveTo(-bkW*0.4, 0); ctx.lineTo(-bkW*0.5, -bkH);
-    ctx.lineTo(bkW*0.5, -bkH); ctx.lineTo(bkW*0.4, 0);
-    ctx.closePath(); ctx.stroke();
-    // Beaker spout (small lip)
-    ctx.beginPath(); ctx.moveTo(bkW*0.5, -bkH); ctx.lineTo(bkW*0.6, -bkH-3); ctx.stroke();
-
-    // Chemical liquid inside beaker
-    const fluidFrac = SIM.fluidInBeaker / 250.0;
-    if (fluidFrac > 0.01) {
-      const lH = bkH * fluidFrac;
-      const lBot = 0, lTop = -lH;
-      const wBot = bkW*0.4, wTop = bkW * (0.4 + 0.1 * (lH/bkH));
-      ctx.fillStyle = CHEM_COLOR;
-      ctx.beginPath();
-      ctx.moveTo(-wBot, lBot); ctx.lineTo(-wTop, lTop);
-      ctx.lineTo(wTop, lTop); ctx.lineTo(wBot, lBot);
-      ctx.closePath(); ctx.fill();
-      // Surface shimmer
-      ctx.strokeStyle='rgba(150,240,255,0.4)';ctx.lineWidth=1;
-      ctx.beginPath();ctx.moveTo(-wTop+1, lTop);ctx.lineTo(wTop-1, lTop);ctx.stroke();
-    }
-
-    ctx.restore();
-
-    // Beaker label (at arm tip)
-    ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#80cbc4';
-    ctx.fillText(Math.round(SIM.fluidInBeaker)+' ml', x+15, y-5);
-
-    // ── Target Glass ──
-    const gx=W*0.78, gy=benchY-1;
-    const glW=22, glH=36;
-    // Glass outline
-    ctx.strokeStyle='rgba(200,230,255,0.35)';ctx.lineWidth=1.5;
-    ctx.beginPath();
-    ctx.moveTo(gx-glW*0.45, gy-glH); ctx.lineTo(gx-glW*0.5, gy);
-    ctx.lineTo(gx+glW*0.5, gy); ctx.lineTo(gx+glW*0.45, gy-glH);
-    ctx.stroke();
-    // Glass bottom
-    ctx.beginPath();ctx.moveTo(gx-glW*0.5, gy);ctx.lineTo(gx+glW*0.5, gy);ctx.stroke();
-
-    // Liquid filling (real poured fraction)
-    const pourH = SIM.pouredFrac * glH;
-    if(pourH > 0.5){
-      const lBot = gy, lTop = gy - pourH;
-      const wBot = glW*0.5, wTop = glW * (0.45 + 0.05 * (pourH/glH));
-      ctx.fillStyle = CHEM_COLOR2;
-      ctx.beginPath();
-      ctx.moveTo(gx-wBot, lBot); ctx.lineTo(gx-wTop, lTop);
-      ctx.lineTo(gx+wTop, lTop); ctx.lineTo(gx+wBot, lBot);
-      ctx.closePath(); ctx.fill();
-      // Surface shimmer
-      ctx.strokeStyle='rgba(100,220,255,0.35)';ctx.lineWidth=1;
-      ctx.beginPath();ctx.moveTo(gx-wTop+1, lTop);ctx.lineTo(gx+wTop-1, lTop);ctx.stroke();
-    }
-
-    // Glass label
-    ctx.font='8px "Segoe UI",system-ui';ctx.fillStyle='#80cbc4';
-    ctx.fillText('Glass ('+(SIM.pouredFrac*250).toFixed(0)+' ml)', gx-22, gy+14);
-
-    // Spill puddle on bench
-    if(SIM.spillFrac>0.005){
-      ctx.fillStyle = SPILL_COLOR;
-      const pw = 6 + SIM.spillFrac*60;
-      ctx.beginPath(); ctx.ellipse(gx, gy+4, pw, 3, 0, 0, Math.PI*2); ctx.fill();
-    }
-
-    // ── Pour stream (liquid flowing from beaker to glass) ──
-    if(SIM.phase==='pour' && SIM.fluidInBeaker>0){
-      // Create cyan droplets from beaker to glass
-      if(Math.random()<0.7){
-        particles.push({x:bkx+(Math.random()-.5)*6, y:bky+bkH*0.3, vx:(gx-bkx)*0.012+(Math.random()-.5)*0.5, vy:1.5+Math.random()*2, life:45, type:'pour'});
-      }
-    }
-    // Spill particles during navigation tilt
-    if(SIM.phase==='navigate' && SIM.beakerTiltDeg>8){
-      if(Math.random()<0.3){
-        particles.push({x:bkx+(Math.random()-.5)*8, y:bky, vx:(Math.random()-.5)*2, vy:1+Math.random(), life:30, type:'spill'});
-      }
-    }
-
-    particles=particles.filter(p=>{
-      p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life--;
-      ctx.beginPath();ctx.arc(p.x,p.y,p.type==='pour'?2.5:1.5,0,Math.PI*2);
-      if(p.type==='pour'){
-        ctx.fillStyle=`rgba(0,200,255,${p.life/45*0.7})`;
-      } else {
-        ctx.fillStyle=`rgba(255,80,80,${p.life/30*0.5})`;
-      }
-      ctx.fill();
-      return p.life>0 && p.y<H;
+  // Color map for URDF link materials
+  function colorFromRGBA(rgba) {
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color(rgba[0], rgba[1], rgba[2]),
+      roughness: 0.3, metalness: 0.6,
+      transparent: rgba[3] < 0.99,
+      opacity: rgba[3],
+      emissive: new THREE.Color(rgba[0]*0.15, rgba[1]*0.15, rgba[2]*0.15),
+      emissiveIntensity: 0.3,
     });
+  }
 
-    // LiDAR sweep
-    const la=(performance.now()/400)%(Math.PI*2);
-    ctx.beginPath();ctx.moveTo(abx,by-20);ctx.arc(abx,by-20,90,la-0.15,la+0.15);ctx.closePath();
-    const lg=ctx.createRadialGradient(abx,by-20,0,abx,by-20,90);
-    lg.addColorStop(0,'rgba(0,229,255,0.12)');lg.addColorStop(1,'rgba(0,229,255,0)');
-    ctx.fillStyle=lg;ctx.fill();
+  /* ── Floor ───────────────────────────────────────────────────────────── */
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(6, 6), matFloor);
+  floor.rotation.x = -Math.PI/2; floor.receiveShadow = true; scene.add(floor);
+  const grid = new THREE.GridHelper(6, 60, 0x1a2a3a, 0x141e2a);
+  grid.position.y = 0.001; scene.add(grid);
 
-    // Safety envelope
-    ctx.setLineDash([4,4]);
-    ctx.strokeStyle=SIM.safetyOk?'rgba(255,145,0,0.12)':'rgba(255,23,68,0.4)';
-    ctx.lineWidth=1;ctx.beginPath();ctx.arc(abx,by-30,150,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+  /* ── Lab bench (positioned in front of robot, not overlapping pedestal) ─ */
+  const benchGroup = new THREE.Group();
+  const benchTop = new THREE.Mesh(new THREE.BoxGeometry(0.70, 0.04, 0.50), matBench);
+  benchTop.position.set(0.50, BENCH_H, 0.25); benchTop.castShadow = true; benchTop.receiveShadow = true;
+  benchGroup.add(benchTop);
+  const legGeo = new THREE.BoxGeometry(0.04, BENCH_H - 0.02, 0.04);
+  [[0.18, 0, 0.03], [0.18, 0, 0.47], [0.82, 0, 0.03], [0.82, 0, 0.47]].forEach(([lx,,lz]) => {
+    const leg = new THREE.Mesh(legGeo, matBenchLeg);
+    leg.position.set(lx, BENCH_H/2, lz); leg.castShadow = true; benchGroup.add(leg);
+  });
+  scene.add(benchGroup);
 
-    // ── Tilt indicator (arc near EE) ──
-    {
-      const tiltRad = SIM.beakerTiltDeg * Math.PI / 180;
-      ctx.strokeStyle = SIM.beakerTiltDeg > 15 ? 'rgba(0,229,255,0.6)' : 'rgba(255,145,0,0.4)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(x, y, 20, -Math.PI/2, -Math.PI/2 + tiltRad, false);
-      ctx.stroke();
-      ctx.font='8px monospace'; ctx.fillStyle='#00e5ff';
-      ctx.fillText(SIM.beakerTiltDeg.toFixed(0)+'°', x+22, y-8);
+  /* ── Glass on bench ──────────────────────────────────────────────────── */
+  const glassGroup = new THREE.Group();
+  const glassBody = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.03, 0.10, 24, 1, true), matGlass);
+  glassBody.position.y = 0.05; glassGroup.add(glassBody);
+  const glassBottom = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.003, 24), matGlass);
+  glassBottom.position.y = 0.001; glassGroup.add(glassBottom);
+  const glassFluid = new THREE.Mesh(new THREE.CylinderGeometry(0.033, 0.028, 0.10, 24), matFluidGlass);
+  glassFluid.position.y = 0.05; glassFluid.scale.y = 0; glassGroup.add(glassFluid);
+  glassGroup.position.set(GLASS_POS_DEFAULT[0], BENCH_H + 0.02, GLASS_POS_DEFAULT[1]);
+  scene.add(glassGroup);
+
+  /* ── Bench safety zone visualization ──────────────────────────────── */
+  const benchZoneMat = new THREE.MeshBasicMaterial({ color: 0xff9100, transparent: true, opacity: 0.04, side: THREE.DoubleSide });
+  const benchZone = new THREE.Mesh(new THREE.BoxGeometry(0.70, 0.77, 0.50), benchZoneMat);
+  benchZone.position.set(0.50, 0.77/2, 0.25);
+  scene.add(benchZone);
+  window._benchZone = benchZone;
+
+  /* ── URDF robot model — built from fetched JSON ──────────────────────── */
+  const linkMeshes = {};  // link_name → THREE.Group
+  const jointGroups = {}; // joint_name → THREE.Group
+  const jointMeta = {};   // joint_name → { axis, type, lower, upper }
+  let urdfLoaded = false;
+
+  // The joint groups that correspond to the 6 actuated joints (in order)
+  let actuatedJointNames = [];
+
+  function buildURDFScene(urdf) {
+    // Create a group for each link
+    for (const [name, link] of Object.entries(urdf.links)) {
+      const g = new THREE.Group();
+      g.name = 'link_' + name;
+      if (link.visual) {
+        const v = link.visual;
+        let geom;
+        if (v.shape === 'cylinder') {
+          geom = new THREE.CylinderGeometry(v.radius, v.radius, v.length, 20);
+        } else if (v.shape === 'box') {
+          geom = new THREE.BoxGeometry(v.size[0], v.size[1], v.size[2]);
+        } else if (v.shape === 'sphere') {
+          geom = new THREE.SphereGeometry(v.radius, 16, 12);
+        }
+        if (geom) {
+          const mat = colorFromRGBA(v.color_rgba);
+          const mesh = new THREE.Mesh(geom, mat);
+          // Apply visual origin
+          mesh.position.set(v.origin_xyz[0], v.origin_xyz[2], v.origin_xyz[1]);
+          mesh.castShadow = true;
+          g.add(mesh);
+        }
+      }
+      linkMeshes[name] = g;
     }
 
-    // Labels
-    ctx.font='9px "Segoe UI",system-ui';ctx.fillStyle='#546e7a';
-    ctx.fillText('AMR Base',abx-22,by+28);
-    ctx.fillText('6-DoF UR5e (carrying beaker)',abx-40,by-90);
-    ctx.fillStyle=SIM.safetyOk?'rgba(0,230,118,0.6)':'rgba(255,23,68,0.8)';
-    ctx.fillText(SIM.safetyOk?'Safety: OK':'SAFETY OVERRIDE!',abx+95,by-140);
+    // Create joint hierarchy
+    for (const jname of urdf.joint_chain) {
+      const j = urdf.joints[jname];
+      const jg = new THREE.Group();
+      jg.name = 'joint_' + jname;
+      jointGroups[jname] = jg;
+      jointMeta[jname] = { axis: j.axis, type: j.type, lower: j.lower, upper: j.upper };
 
-    // Phase label
-    const phaseColors = {navigate:'#ff9100', pour:'#00e5ff', done:'#00e676'};
-    ctx.font='bold 11px "Segoe UI",system-ui';
-    ctx.fillStyle = phaseColors[SIM.phase] || '#546e7a';
-    ctx.fillText('Phase: ' + SIM.phase.toUpperCase(), W*0.02, 18);
+      // Position joint group at the joint origin (URDF xyz → Three.js xyz,y,z)
+      // URDF: x=forward, y=left, z=up → Three.js: x=x, y=z(up), z=y
+      jg.position.set(j.origin_xyz[0], j.origin_xyz[2], j.origin_xyz[1]);
 
-    // Overlay when disconnected
-    if(!SIM.connected){
-      ctx.fillStyle='rgba(0,0,0,0.55)';ctx.fillRect(0,0,W,H);
-      ctx.font='15px "Segoe UI",system-ui';ctx.fillStyle='#ff9100';ctx.textAlign='center';
-      ctx.fillText('Connecting to live simulation via WebSocket...',W/2,H/2);
-      ctx.textAlign='start';
+      // Apply joint origin RPY rotation
+      const [roll, pitch, yaw] = j.origin_rpy;
+      // Construct rotation: URDF RPY (XYZ intrinsic) → Three.js
+      // URDF X → Three X, URDF Z → Three Y, URDF Y → Three Z
+      const euler = new THREE.Euler(roll, yaw, pitch, 'XYZ');
+      jg.setRotationFromEuler(euler);
+
+      // Attach child link mesh to this joint group
+      if (linkMeshes[j.child]) {
+        jg.add(linkMeshes[j.child]);
+      }
+
+      // Attach this joint group to the parent link's mesh group
+      if (linkMeshes[j.parent]) {
+        linkMeshes[j.parent].add(jg);
+      }
     }
 
-    requestAnimationFrame(draw);
-  }
-  draw();
+    // Add the root link to the scene (world is the root)
+    if (linkMeshes['world']) {
+      scene.add(linkMeshes['world']);
+    }
 
-  function roundRect(c,x,y,w,h,r){
-    c.beginPath();c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);c.closePath();c.fill();c.stroke();
+    actuatedJointNames = urdf.actuated_joints;
+
+    // Add joint indicator spheres for actuated joints
+    for (const jname of actuatedJointNames) {
+      const jg = jointGroups[jname];
+      if (jg) {
+        const indicator = new THREE.Mesh(new THREE.SphereGeometry(0.015, 8, 6), matJoint);
+        jg.add(indicator);
+      }
+    }
+
+    // Add gripper fingers to tool0
+    if (linkMeshes['tool0']) {
+      const fingerGeo = new THREE.BoxGeometry(0.006, 0.04, 0.008);
+      const fingerL = new THREE.Mesh(fingerGeo, matGripper);
+      fingerL.position.set(-0.012, 0.035, 0);
+      linkMeshes['tool0'].add(fingerL);
+      const fingerR = new THREE.Mesh(fingerGeo, matGripper);
+      fingerR.position.set(0.012, 0.035, 0);
+      linkMeshes['tool0'].add(fingerR);
+      window._gripFingers = [fingerL, fingerR];
+
+      // EE glow
+      const eeGlow = new THREE.PointLight(0xcc33ff, 0.5, 0.3);
+      eeGlow.position.y = 0.02;
+      linkMeshes['tool0'].add(eeGlow);
+      window._eeGlow = eeGlow;
+    }
+
+    // Beaker fluid mesh in the beaker link
+    if (linkMeshes['beaker']) {
+      const bf = new THREE.Mesh(new THREE.CylinderGeometry(0.033, 0.026, 0.085, 24), matFluid);
+      bf.position.y = 0.065;
+      linkMeshes['beaker'].add(bf);
+      window._beakerFluid = bf;
+    }
+
+    urdfLoaded = true;
+    console.log('URDF 3D scene built:', actuatedJointNames);
   }
+
+  // Fetch URDF JSON and build scene
+  fetch('/api/v1/urdf')
+    .then(r => r.json())
+    .then(urdf => buildURDFScene(urdf))
+    .catch(err => console.error('Failed to load URDF:', err));
+
+  /* ── Coordinate axes ─────────────────────────────────────────────────── */
+  const axLen = 0.3;
+  const axMats = [new THREE.MeshBasicMaterial({color:0xff4444}), new THREE.MeshBasicMaterial({color:0x44ff44}), new THREE.MeshBasicMaterial({color:0x4444ff})];
+  const axGeo = new THREE.CylinderGeometry(0.003, 0.003, axLen, 4);
+  [[0, axLen/2, 0, 0, 0, 0], [axLen/2, 0, 0, 0, 0, Math.PI/2], [0, 0, axLen/2, Math.PI/2, 0, 0]].forEach(([px,py,pz,rx,ry,rz], i) => {
+    const ax = new THREE.Mesh(axGeo, axMats[i]);
+    ax.position.set(px, py, pz); ax.rotation.set(rx, ry, rz); scene.add(ax);
+  });
+
+  /* ── Pour stream particles ───────────────────────────────────────────── */
+  const MAX_DROPS = 80;
+  const dropGeo = new THREE.SphereGeometry(0.005, 6, 4);
+  const dropMat = new THREE.MeshBasicMaterial({ color:0x00ccff, transparent:true, opacity:0.7 });
+  const drops = [];
+  for(let i = 0; i < MAX_DROPS; i++){
+    const m = new THREE.Mesh(dropGeo, dropMat.clone());
+    m.visible = false; scene.add(m);
+    drops.push({ mesh:m, vel:new THREE.Vector3(), life:0 });
+  }
+  let dropIdx = 0;
+
+  /* ── Resize ──────────────────────────────────────────────────────────── */
+  function onResize(){
+    const r = container.getBoundingClientRect();
+    renderer.setSize(r.width, r.height);
+    camera.aspect = r.width / r.height;
+    camera.updateProjectionMatrix();
+  }
+  onResize(); window.addEventListener('resize', onResize);
+
+  /* ── Update joint angles from telemetry ──────────────────────────────── */
+  function updateJoints(angles) {
+    if (!urdfLoaded || actuatedJointNames.length === 0) return;
+    for (let i = 0; i < actuatedJointNames.length && i < angles.length; i++) {
+      const jname = actuatedJointNames[i];
+      const jg = jointGroups[jname];
+      const meta = jointMeta[jname];
+      if (!jg || !meta) continue;
+      const angle = angles[i];
+
+      // Parse the URDF joint origin RPY to get the base rotation
+      // Then apply the joint angle around the joint axis
+      // The joint group already has origin rotation set in buildURDFScene
+      // We need to ADD the joint rotation on top of the origin rotation
+      const j = jg;
+      // Re-read origin RPY from the joint data
+      // For simplicity, apply rotation around the local axis
+      // axis is in URDF local frame
+      const ax = meta.axis;
+
+      // Reset to origin rotation first, then add joint angle
+      // Store original rotation if not stored
+      if (j._origQuat === undefined) {
+        j._origQuat = j.quaternion.clone();
+      }
+      j.quaternion.copy(j._origQuat);
+      // Create rotation around the axis
+      // URDF axis [x,y,z] → Three.js axis [x,z,y]
+      const threeAxis = new THREE.Vector3(ax[0], ax[2], ax[1]).normalize();
+      const q = new THREE.Quaternion().setFromAxisAngle(threeAxis, angle);
+      j.quaternion.premultiply(q);
+    }
+  }
+
+  /* ── Animation loop ──────────────────────────────────────────────────── */
+  function animate(){
+    requestAnimationFrame(animate);
+
+    if (urdfLoaded) {
+      updateJoints(SIM.joints);
+
+      // Gripper
+      if (window._gripFingers) {
+        const gripOff = 0.008 + SIM.gripper * 0.012;
+        window._gripFingers[0].position.x = -gripOff;
+        window._gripFingers[1].position.x = gripOff;
+      }
+
+      // Beaker fluid level
+      if (window._beakerFluid) {
+        const ff = SIM.fluidInBeaker / 250.0;
+        window._beakerFluid.scale.y = Math.max(0.01, ff);
+        window._beakerFluid.material.opacity = 0.7 * ff;
+      }
+
+      // Glass fluid
+      const gff = SIM.pouredFrac;
+      glassFluid.scale.y = Math.max(0.01, gff);
+      glassFluid.position.y = 0.05 * Math.max(0.01, gff);
+      glassFluid.material.opacity = 0.6 * gff;
+
+      // EE glow — changes color based on phase AND collision
+      if (window._eeGlow) {
+        if (SIM.collision) {
+          window._eeGlow.color.setHex(0xff1744);
+          window._eeGlow.intensity = 1.5;
+        } else if (SIM.phase === 'pour') {
+          window._eeGlow.color.setHex(0x00ccff);
+          window._eeGlow.intensity = 0.8;
+        } else if (SIM.phase === 'done') {
+          window._eeGlow.color.setHex(0x00ff66);
+          window._eeGlow.intensity = 1.0;
+        } else {
+          window._eeGlow.color.setHex(0xcc33ff);
+          window._eeGlow.intensity = 0.4 + 0.2 * Math.sin(performance.now() * 0.005);
+        }
+      }
+
+      // Bench zone collision indicator
+      if (window._benchZone) {
+        if (SIM.collision) {
+          window._benchZone.material.color.setHex(0xff1744);
+          window._benchZone.material.opacity = 0.12;
+        } else {
+          window._benchZone.material.color.setHex(0xff9100);
+          window._benchZone.material.opacity = 0.04;
+        }
+      }
+
+      // Update glass position from telemetry (domain randomization)
+      if (SIM.glassPos) {
+        glassGroup.position.set(SIM.glassPos[0], BENCH_H + 0.02, SIM.glassPos[1]);
+      }
+    }
+
+    // Pour particles
+    if (SIM.phase === 'pour' && SIM.fluidInBeaker > 0 && linkMeshes['tool0']) {
+      const eeWorld = new THREE.Vector3();
+      linkMeshes['tool0'].getWorldPosition(eeWorld);
+      for(let i = 0; i < 2; i++){
+        const d = drops[dropIdx % MAX_DROPS];
+        d.mesh.visible = true;
+        d.mesh.position.copy(eeWorld);
+        d.mesh.position.y += 0.05;
+        d.vel.set((Math.random()-0.5)*0.3, -0.5 - Math.random()*0.5, (Math.random()-0.5)*0.3);
+        d.life = 60;
+        dropIdx++;
+      }
+    }
+    for(const d of drops){
+      if(d.life <= 0){ d.mesh.visible = false; continue; }
+      d.mesh.position.x += d.vel.x * 0.016;
+      d.mesh.position.y += d.vel.y * 0.016;
+      d.mesh.position.z += d.vel.z * 0.016;
+      d.vel.y -= 2.0 * 0.016;
+      d.life--;
+      d.mesh.material.opacity = 0.7 * (d.life / 60);
+      if(d.mesh.position.y < 0) d.life = 0;
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  window.twinScene = { linkMeshes, jointGroups, scene, camera, glassGroup };
 })();
 
 /* ─── Joint & Action bar visualisations ────────────────────────────────── */
 const jNames=['J1','J2','J3','J4','J5','J6'];
-const aNames=['vx','vy','\u03c9','j1','j2','j3','j4','j5','j6','grip'];
+const aNames=['j1','j2','j3','j4','j5','j6','grip'];
 function initBars(){
   document.getElementById('jointBars').innerHTML=jNames.map((_,i)=>`
     <div style="text-align:center">
@@ -528,10 +700,10 @@ function updateBars(){
     if(b){b.style.height=p+'%';b.style.background=v>=0?'linear-gradient(0deg,#00e5ff44,#7c4dff44)':'linear-gradient(0deg,#ff174444,#ff910044)'}
     if(l)l.textContent=v.toFixed(3);
   }
-  for(let i=0;i<10;i++){
+  for(let i=0;i<7;i++){
     const v=SIM.action[i]||0;const p=Math.min(Math.abs(v)/1*100,100);
     const b=document.getElementById('abar'+i),l=document.getElementById('aval'+i);
-    if(b)b.style.height=p+'%';
+    if(b){b.style.height=p+'%';b.style.background=v>=0?'linear-gradient(0deg,#00e67644,#00e5ff44)':'linear-gradient(0deg,#ff174444,#ff910044)'}
     if(l)l.textContent=v.toFixed(3);
   }
 }
@@ -570,6 +742,7 @@ function connectWS(){
       SIM.beakerTiltDeg=d.beaker_tilt_deg??SIM.beakerTiltDeg;
       SIM.fluidInBeaker=d.fluid_in_beaker??SIM.fluidInBeaker;
       SIM.grasped=d.grasped??SIM.grasped;
+      SIM.collision=d.collision??SIM.collision;
 
       document.getElementById('simEpisode').textContent=d.episode;
       document.getElementById('simStep').textContent=d.step;
@@ -604,12 +777,32 @@ function connectWS(){
     } else if(d.type==='sim_episode_end'){
       SIM.rewardHistory.push(d.total_reward);
       if(SIM.rewardHistory.length>200) SIM.rewardHistory.shift();
+      SIM.totalEpisodes=d.total_episodes||SIM.totalEpisodes;
+      SIM.bestReward=d.best_reward??SIM.bestReward;
+      SIM.avgReward20=d.avg_reward_20??SIM.avgReward20;
+      // Compute learning trend
+      if(SIM.rewardHistory.length>=10){
+        const last10=SIM.rewardHistory.slice(-10).reduce((a,b)=>a+b,0)/10;
+        const prev10=SIM.rewardHistory.slice(-20,-10);
+        if(prev10.length>=5){
+          const p10=prev10.reduce((a,b)=>a+b,0)/prev10.length;
+          SIM.learningTrend=last10>p10*1.05?'\u2191 improving':last10<p10*0.95?'\u2193 declining':'\u2192 stable';
+        }
+      }
       const el=document.getElementById('avgReward');
       if(el)el.textContent=d.total_reward.toFixed(1);
+      const be=document.getElementById('bestReward');
+      if(be)be.textContent=SIM.bestReward.toFixed(1);
+      const a20=document.getElementById('avgReward20');
+      if(a20)a20.textContent=SIM.avgReward20.toFixed(1);
+      const te=document.getElementById('totalEpisodes');
+      if(te)te.textContent=SIM.totalEpisodes;
+      const lt=document.getElementById('learningTrend');
+      if(lt){lt.textContent=SIM.learningTrend;lt.style.color=SIM.learningTrend.includes('\u2191')?'#00e676':SIM.learningTrend.includes('\u2193')?'#ff1744':'#ffab00'}
       drawRewardChart();
-      addTelemetry('ep',`Episode ${d.episode} done: reward=${d.total_reward} steps=${d.steps} poured=${(d.poured_frac*100).toFixed(1)}% spilled=${(d.spill_frac*100).toFixed(2)}% phase=${(d.phase||'?').toUpperCase()}`);
+      addTelemetry('ep',`Episode ${d.episode} done: reward=${d.total_reward.toFixed(1)} best=${SIM.bestReward.toFixed(1)} avg20=${SIM.avgReward20.toFixed(1)} poured=${(d.poured_frac*100).toFixed(1)}% ${SIM.learningTrend}`);
     } else if(d.type==='train_step'){
-      SIM.trainStep=d.metrics?.step||SIM.trainStep;
+      SIM.trainStep=d.metrics?.step||d.total_train_steps||SIM.trainStep;
       SIM.policyLoss=d.metrics?.policy_loss;
       SIM.valueLoss=d.metrics?.value_loss;
       SIM.entropy=d.metrics?.entropy;
@@ -698,27 +891,40 @@ function drawRewardChart(){
   const data=SIM.rewardHistory.slice(-100);
   const mn=Math.min(...data),mx=Math.max(...data);
   const rng=mx-mn||1;
-  // Fill area
-  ctx2.beginPath();
-  for(let i=0;i<data.length;i++){
-    const px=(i/(data.length-1))*w;
-    const py=h-((data[i]-mn)/rng)*(h-6)-3;
-    if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);
+  const toY=v=>h-((v-mn)/rng)*(h-8)-4;
+  const toX=i=>(i/(data.length-1))*w;
+  // Zero line
+  if(mn<0&&mx>0){
+    const zy=toY(0);
+    ctx2.strokeStyle='rgba(255,255,255,0.1)';ctx2.lineWidth=1;
+    ctx2.beginPath();ctx2.moveTo(0,zy);ctx2.lineTo(w,zy);ctx2.stroke();
   }
+  // Fill area under curve
+  ctx2.beginPath();
+  for(let i=0;i<data.length;i++){const px=toX(i),py=toY(data[i]);if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);}
   ctx2.lineTo(w,h);ctx2.lineTo(0,h);ctx2.closePath();
   ctx2.fillStyle='rgba(0,229,255,0.08)';ctx2.fill();
-  // Stroke line
+  // Raw reward line
   ctx2.beginPath();
+  for(let i=0;i<data.length;i++){const px=toX(i),py=toY(data[i]);if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);}
+  ctx2.strokeStyle='rgba(0,229,255,0.4)';ctx2.lineWidth=1;ctx2.stroke();
+  // Rolling average line (window=10)
+  const ravg=[];
   for(let i=0;i<data.length;i++){
-    const px=(i/(data.length-1))*w;
-    const py=h-((data[i]-mn)/rng)*(h-6)-3;
-    if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);
+    const start=Math.max(0,i-9);
+    let s=0;for(let j=start;j<=i;j++)s+=data[j];
+    ravg.push(s/(i-start+1));
   }
-  ctx2.strokeStyle='#00e5ff';ctx2.lineWidth=1.5;ctx2.stroke();
+  ctx2.beginPath();
+  for(let i=0;i<ravg.length;i++){const px=toX(i),py=toY(ravg[i]);if(i===0)ctx2.moveTo(px,py);else ctx2.lineTo(px,py);}
+  ctx2.strokeStyle='#00e5ff';ctx2.lineWidth=2;ctx2.stroke();
   // Latest value dot
-  const lastY=h-((data[data.length-1]-mn)/rng)*(h-6)-3;
-  ctx2.beginPath();ctx2.arc(w,lastY,3,0,Math.PI*2);
-  ctx2.fillStyle='#00e5ff';ctx2.fill();
+  const lastY=toY(data[data.length-1]);
+  ctx2.beginPath();ctx2.arc(w-1,lastY,3,0,Math.PI*2);ctx2.fillStyle='#00e5ff';ctx2.fill();
+  // Min/Max labels
+  ctx2.font='9px monospace';ctx2.fillStyle='rgba(0,229,255,0.5)';
+  ctx2.fillText(mx.toFixed(0),2,10);
+  ctx2.fillText(mn.toFixed(0),2,h-2);
 }
 
 function highlightNode(n){
