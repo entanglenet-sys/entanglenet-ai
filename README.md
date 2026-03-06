@@ -1,4 +1,4 @@
-# PHILOS — PHysical IntelLigence, Learning, Optimization, and Semantics
+# Pysical IntelLigence, Learning, Optimization, and Semantics
 
 > Foundation model for adaptive mobile manipulation — bridging language understanding,
 > reinforcement learning, and deterministic safety control.
@@ -9,14 +9,14 @@
 [![NVIDIA Isaac Sim](https://img.shields.io/badge/NVIDIA-Isaac%20Sim-76B900.svg)](https://developer.nvidia.com/isaac-sim)
 
 <p align="center">
-  <img src="pic.png" alt="PHILOS Architecture" width="720">
+  <img src="pic.png" alt="ENT AI Architecture" width="720">
 </p>
 
 ---
 
 ## Overview
 
-PHILOS implements a **dual-loop cognitive architecture** for mobile manipulation robots,
+ENT AI implements a **dual-loop cognitive architecture** for mobile manipulation robots,
 designed to operate in safety-critical environments (chemical labs, industrial settings).
 
 ```
@@ -279,3 +279,4 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 **PHILOS** is developed by [Entanglenet GmbH](https://entanglenet.ai) as part of the
 EIC Horizon Europe Transition programme.
+
