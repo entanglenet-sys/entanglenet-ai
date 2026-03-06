@@ -249,7 +249,7 @@
 /* ─── Shared simulation state (updated from WebSocket) ─────────────────── */
 const SIM = {
   connected: false,
-  joints: [0,0,0,0,0,0],
+  joints: [0,0,0,0,0,0,0.04,0.04],
   eePos: [0,0,0.5],
   basePos: [0,0,0],
   gripper: 0,
@@ -259,13 +259,16 @@ const SIM = {
   pouredFrac: 0, spillFrac: 0,
   done: false, safetyOk: true,
   // Physical state
-  phase: 'reach',
-  beakerPos: [0.5, 0.0, 0.85],
-  glassPos: [0.45, 0.25, 0.78],
+  phase: 'approach',
+  beakerPos: [0.35, 0.10, 0.825],
+  glassPos: [0.60, 0.35, 0.78],
   beakerTiltDeg: 0,
   fluidInBeaker: 250,
-  grasped: true,
+  grasped: false,
   collision: false,
+  beakerOnBench: true,
+  fingerQ: [0.04, 0.04],
+  gripperOpenness: 1.0,
   // Learning state
   trainStep: 0, policyLoss: 0, valueLoss: 0, entropy: 0,
   rewardHistory: [],
@@ -293,7 +296,8 @@ const SIM = {
   if(!container) return;
 
   const BENCH_H = 0.75;
-  const GLASS_POS_DEFAULT = [0.45, 0.25, 0.78];
+  const GLASS_POS_DEFAULT = [0.60, 0.35, 0.78];
+  const SRC_BEAKER_DEFAULT = [0.35, 0.10, 0.825];
 
   /* ── Renderer ────────────────────────────────────────────────────────── */
   const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
@@ -394,6 +398,21 @@ const SIM = {
   scene.add(benchZone);
   window._benchZone = benchZone;
 
+  /* ── Source beaker (free object on bench — not part of URDF) ─────── */
+  const srcBeakerGroup = new THREE.Group();
+  const srcBeakerBody = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035, 0.030, 0.09, 24, 1, true), matBeaker);
+  srcBeakerBody.position.y = 0.045; srcBeakerGroup.add(srcBeakerBody);
+  const srcBeakerBottom = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.030, 0.030, 0.003, 24), matBeaker);
+  srcBeakerBottom.position.y = 0.001; srcBeakerGroup.add(srcBeakerBottom);
+  const srcBeakerFluid = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.033, 0.028, 0.085, 24), matFluid);
+  srcBeakerFluid.position.y = 0.043; srcBeakerGroup.add(srcBeakerFluid);
+  // Initial position (URDF x,y,z → Three.js x,z,y)
+  srcBeakerGroup.position.set(SRC_BEAKER_DEFAULT[0], SRC_BEAKER_DEFAULT[2], SRC_BEAKER_DEFAULT[1]);
+  scene.add(srcBeakerGroup);
+
   /* ── URDF robot model — built from fetched JSON ──────────────────────── */
   const linkMeshes = {};  // link_name → THREE.Group
   const jointGroups = {}; // joint_name → THREE.Group
@@ -476,30 +495,12 @@ const SIM = {
       }
     }
 
-    // Add gripper fingers to tool0
+    // EE glow on tool0 (gripper fingers now built from URDF prismatic joints)
     if (linkMeshes['tool0']) {
-      const fingerGeo = new THREE.BoxGeometry(0.006, 0.04, 0.008);
-      const fingerL = new THREE.Mesh(fingerGeo, matGripper);
-      fingerL.position.set(-0.012, 0.035, 0);
-      linkMeshes['tool0'].add(fingerL);
-      const fingerR = new THREE.Mesh(fingerGeo, matGripper);
-      fingerR.position.set(0.012, 0.035, 0);
-      linkMeshes['tool0'].add(fingerR);
-      window._gripFingers = [fingerL, fingerR];
-
-      // EE glow
       const eeGlow = new THREE.PointLight(0xcc33ff, 0.5, 0.3);
       eeGlow.position.y = 0.02;
       linkMeshes['tool0'].add(eeGlow);
       window._eeGlow = eeGlow;
-    }
-
-    // Beaker fluid mesh in the beaker link
-    if (linkMeshes['beaker']) {
-      const bf = new THREE.Mesh(new THREE.CylinderGeometry(0.033, 0.026, 0.085, 24), matFluid);
-      bf.position.y = 0.065;
-      linkMeshes['beaker'].add(bf);
-      window._beakerFluid = bf;
     }
 
     urdfLoaded = true;
@@ -550,29 +551,28 @@ const SIM = {
       const jg = jointGroups[jname];
       const meta = jointMeta[jname];
       if (!jg || !meta) continue;
-      const angle = angles[i];
-
-      // Parse the URDF joint origin RPY to get the base rotation
-      // Then apply the joint angle around the joint axis
-      // The joint group already has origin rotation set in buildURDFScene
-      // We need to ADD the joint rotation on top of the origin rotation
+      const val = angles[i];
       const j = jg;
-      // Re-read origin RPY from the joint data
-      // For simplicity, apply rotation around the local axis
-      // axis is in URDF local frame
       const ax = meta.axis;
-
-      // Reset to origin rotation first, then add joint angle
-      // Store original rotation if not stored
-      if (j._origQuat === undefined) {
-        j._origQuat = j.quaternion.clone();
-      }
-      j.quaternion.copy(j._origQuat);
-      // Create rotation around the axis
       // URDF axis [x,y,z] → Three.js axis [x,z,y]
       const threeAxis = new THREE.Vector3(ax[0], ax[2], ax[1]).normalize();
-      const q = new THREE.Quaternion().setFromAxisAngle(threeAxis, angle);
-      j.quaternion.premultiply(q);
+
+      if (meta.type === 'prismatic') {
+        // Prismatic joint: translate along axis
+        if (j._origPos === undefined) {
+          j._origPos = j.position.clone();
+        }
+        j.position.copy(j._origPos);
+        j.position.addScaledVector(threeAxis, val);
+      } else {
+        // Revolute joint: rotate around axis
+        if (j._origQuat === undefined) {
+          j._origQuat = j.quaternion.clone();
+        }
+        j.quaternion.copy(j._origQuat);
+        const q = new THREE.Quaternion().setFromAxisAngle(threeAxis, val);
+        j.quaternion.premultiply(q);
+      }
     }
   }
 
@@ -583,18 +583,25 @@ const SIM = {
     if (urdfLoaded) {
       updateJoints(SIM.joints);
 
-      // Gripper
-      if (window._gripFingers) {
-        const gripOff = 0.008 + SIM.gripper * 0.012;
-        window._gripFingers[0].position.x = -gripOff;
-        window._gripFingers[1].position.x = gripOff;
+      // Source beaker: track position from telemetry (URDF xyz → Three.js xzy)
+      if (SIM.beakerPos) {
+        srcBeakerGroup.position.set(
+          SIM.beakerPos[0], SIM.beakerPos[2], SIM.beakerPos[1]);
+        // Match gripper orientation when grasped
+        if (SIM.grasped && linkMeshes['gripper_tip']) {
+          const tipQ = new THREE.Quaternion();
+          linkMeshes['gripper_tip'].getWorldQuaternion(tipQ);
+          srcBeakerGroup.quaternion.copy(tipQ);
+        } else {
+          srcBeakerGroup.quaternion.identity();
+        }
       }
 
-      // Beaker fluid level
-      if (window._beakerFluid) {
+      // Source beaker fluid level
+      if (srcBeakerFluid) {
         const ff = SIM.fluidInBeaker / 250.0;
-        window._beakerFluid.scale.y = Math.max(0.01, ff);
-        window._beakerFluid.material.opacity = 0.7 * ff;
+        srcBeakerFluid.scale.y = Math.max(0.01, ff);
+        srcBeakerFluid.material.opacity = 0.7 * ff;
       }
 
       // Glass fluid
@@ -608,6 +615,12 @@ const SIM = {
         if (SIM.collision) {
           window._eeGlow.color.setHex(0xff1744);
           window._eeGlow.intensity = 1.5;
+        } else if (SIM.phase === 'grasp') {
+          window._eeGlow.color.setHex(0xffab00);
+          window._eeGlow.intensity = 0.8;
+        } else if (SIM.phase === 'lift') {
+          window._eeGlow.color.setHex(0x00e5ff);
+          window._eeGlow.intensity = 0.7;
         } else if (SIM.phase === 'pour') {
           window._eeGlow.color.setHex(0x00ccff);
           window._eeGlow.intensity = 0.8;
@@ -638,14 +651,14 @@ const SIM = {
     }
 
     // Pour particles
-    if (SIM.phase === 'pour' && SIM.fluidInBeaker > 0 && linkMeshes['tool0']) {
-      const eeWorld = new THREE.Vector3();
-      linkMeshes['tool0'].getWorldPosition(eeWorld);
+    if (SIM.phase === 'pour' && SIM.fluidInBeaker > 0 && SIM.grasped && SIM.beakerPos) {
       for(let i = 0; i < 2; i++){
         const d = drops[dropIdx % MAX_DROPS];
         d.mesh.visible = true;
-        d.mesh.position.copy(eeWorld);
-        d.mesh.position.y += 0.05;
+        d.mesh.position.set(
+          SIM.beakerPos[0] + (Math.random()-0.5)*0.02,
+          SIM.beakerPos[2] + 0.05,
+          SIM.beakerPos[1] + (Math.random()-0.5)*0.02);
         d.vel.set((Math.random()-0.5)*0.3, -0.5 - Math.random()*0.5, (Math.random()-0.5)*0.3);
         d.life = 60;
         dropIdx++;
@@ -743,6 +756,9 @@ function connectWS(){
       SIM.fluidInBeaker=d.fluid_in_beaker??SIM.fluidInBeaker;
       SIM.grasped=d.grasped??SIM.grasped;
       SIM.collision=d.collision??SIM.collision;
+      SIM.beakerOnBench=d.beaker_on_bench??SIM.beakerOnBench;
+      SIM.fingerQ=d.finger_q||SIM.fingerQ;
+      SIM.gripperOpenness=d.gripper_openness??SIM.gripperOpenness;
 
       document.getElementById('simEpisode').textContent=d.episode;
       document.getElementById('simStep').textContent=d.step;

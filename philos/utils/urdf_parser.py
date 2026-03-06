@@ -291,7 +291,7 @@ def _build_chain(robot: URDFRobot):
         for jname, j in robot.joints.items():
             if j.parent == link_name and jname not in robot.joint_chain:
                 robot.joint_chain.append(jname)
-                if j.type == "revolute":
+                if j.type in ("revolute", "prismatic"):
                     robot.actuated_joints.append(jname)
                 queue.append(j.child)
 
@@ -381,6 +381,17 @@ def forward_kinematics(
             if j.lower != j.upper:
                 angle = max(j.lower, min(j.upper, angle))
             joint_T = _make_transform(j.origin_xyz, j.origin_rpy, j.axis, angle)
+        elif j.type == "prismatic":
+            # Prismatic: translate along axis by joint_position
+            if j.lower != j.upper:
+                angle = max(j.lower, min(j.upper, angle))
+            joint_T = _make_transform(j.origin_xyz, j.origin_rpy)
+            # Apply translation along the joint axis
+            ax = np.array(j.axis, dtype=float)
+            ax = ax / (np.linalg.norm(ax) + 1e-12)
+            T_slide = np.eye(4)
+            T_slide[:3, 3] = ax * angle
+            joint_T = joint_T @ T_slide
         else:
             joint_T = _make_transform(j.origin_xyz, j.origin_rpy)
 

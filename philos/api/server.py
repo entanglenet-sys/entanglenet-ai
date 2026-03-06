@@ -175,7 +175,7 @@ async def _run_simulation_loop() -> None:
                 rollout_dones.append(1.0 if done else 0.0)
 
                 # Build telemetry payload
-                joint_positions = env._joint_pos.tolist()
+                joint_positions = env._joint_pos.tolist() + env._finger_pos.tolist()
                 ee_pos = env._ee_pos.tolist()
                 total_vol = cfg.source_volume_ml if cfg.source_volume_ml > 0 else 1.0
                 poured_frac = env._poured_volume / total_vol
@@ -188,7 +188,7 @@ async def _run_simulation_loop() -> None:
                     "joints": joint_positions,
                     "ee_pos": ee_pos,
                     "base_pos": [0, 0, 0],  # fixed pedestal
-                    "gripper": safe_cmd.gripper_position,
+                    "gripper": env._gripper_openness,
                     "action": safe_action[:7].tolist(),
                     "reward": round(float(reward), 3),
                     "ep_reward": round(ep_reward, 2),
@@ -206,6 +206,9 @@ async def _run_simulation_loop() -> None:
                     "grasped": env._grasped,
                     "collision": env._collision,
                     "bench_clearance": round(env._min_bench_clearance, 3),
+                    "finger_q": env._finger_pos.tolist(),
+                    "gripper_openness": env._gripper_openness,
+                    "beaker_on_bench": env._beaker_on_bench,
                 }
                 await _broadcast_telemetry(telem)
 

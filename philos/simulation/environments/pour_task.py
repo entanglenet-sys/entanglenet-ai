@@ -1,33 +1,41 @@
 """
-"The Sommelier" — Chemical-Liquid Pouring Task (WP4 T4.2).
+"The Sommelier" — Chemical-Liquid Pick-and-Pour Task (WP4 T4.2).
 
-A UR5e 6-DoF arm on a FIXED PEDESTAL (no AMR in initial setup)
-holds a beaker of chemical liquid and must:
-    1. Position the arm to bring the beaker over the target glass
-    2. Tilt the wrist to pour liquid precisely into the glass
-    3. Pour the correct amount without spilling
+A UR5e 6-DoF arm with a parallel-jaw gripper on a FIXED PEDESTAL
+must perform a complete pick-and-pour sequence:
+    1. APPROACH — Move gripper (open) above the source beaker on the bench
+    2. GRASP   — Close gripper fingers around the beaker
+    3. LIFT    — Lift the beaker off the bench surface
+    4. POUR    — Transport beaker over the target glass, tilt to pour
+    5. DONE    — Target volume reached
 
-The robot model is loaded from the project URDF file, which is the
-single source of truth for link lengths, joint limits, masses, and
-visual geometry.  Both this simulation and the 3D digital twin
-read from the same URDF, guaranteeing a 1:1 match.
+The robot model (including the Robotiq-style gripper) is loaded from
+the project URDF file, which is the single source of truth for link
+lengths, joint limits, masses, and visual geometry.  Both this
+simulation and the 3D digital twin read from the same URDF.
 
 Physical constraints (from URDF):
-    - 6 revolute joints with hard position/velocity/torque limits
+    - 6 revolute arm joints with hard position/velocity/torque limits
+    - 2 prismatic finger joints (parallel-jaw gripper)
     - Real UR5e DH parameters
-    - Gravity: 9.81 m/s²  (affects liquid, joint torques)
+    - Gravity: 9.81 m/s² (affects liquid, falling objects, joint torques)
     - Payload: beaker + liquid ≈ 0.55 kg
 
+Gripper notes:
+    - Beaker diameter ≈ 70 mm → grasp at finger_q ≈ 0.027 per finger
+    - Finger gap: 16 mm (fully closed) → 96 mm (fully open)
+    - Grasped when: proximity OK + fingers closed on beaker
+
 Fluid model (simplified physics):
-    - Pour rate = f(tilt_angle): zero below 15°, ramps to max at 90°
-    - Spill if beaker tilt > 8° when not over glass
-    - Surface tension → small delay before flow starts
-    - Gravity-driven parabolic stream
+    - Pour rate = f(beaker_tilt): zero below 45°, ramps to max at 90°
+    - Beaker tilt computed from gripper orientation: tilt = arccos(-tool_z · up)
+    - When beaker is on table, tilt = 0° (upright)
+    - Spill if beaker tilt > 20° when not over glass
 
 Success criteria (PHILOS KPIs):
     - Spill rate   < 5 % of original volume
     - Pour accuracy: volume error < 10 %
-    - No collisions
+    - No collisions with bench/objects
 """
 
 from __future__ import annotations
@@ -63,18 +71,20 @@ except ImportError:
 # ─── Task phases ──────────────────────────────────────────────────────────────
 
 class TaskPhase(str, Enum):
-    REACH = "reach"        # Move EE to pouring position above glass
-    POUR  = "pour"         # Tilt wrist to pour liquid
-    DONE  = "done"         # Target volume reached
+    APPROACH = "approach"  # Move to above source beaker, open gripper
+    GRASP    = "grasp"     # Close gripper around beaker
+    LIFT     = "lift"      # Lift beaker off the bench
+    POUR     = "pour"      # Move over glass + tilt to pour
+    DONE     = "done"      # Success
 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 @dataclass
 class PourTaskConfig(EnvConfig):
-    """Configuration for the chemical-liquid pouring task.
+    """Configuration for the pick-and-pour task.
 
-    Robot geometry is loaded from URDF at runtime — no hardcoded link lengths.
+    Robot geometry (including Robotiq-style gripper) is loaded from URDF.
     """
 
     # ── Fluid ──────────────────────────────────────────────
@@ -84,59 +94,80 @@ class PourTaskConfig(EnvConfig):
     max_spill_fraction: float = 0.05
 
     # ── Lab geometry (metres, URDF world frame) ────────────
-    # Robot pedestal is at origin (0,0,0).  Bench is in FRONT
-    # of the robot, NOT overlapping the pedestal.
-    glass_position: tuple[float, float, float] = (0.45, 0.25, 0.78)
+    # Robot pedestal at origin.  Bench is in FRONT of robot.
+    source_beaker_position: tuple[float, float, float] = (0.35, 0.10, 0.825)
+    target_glass_position: tuple[float, float, float] = (0.60, 0.35, 0.78)
     bench_height: float = 0.75
-    pour_arrive_distance: float = 0.10  # EE-to-glass XY for POUR phase
+    beaker_radius: float = 0.035   # 70 mm diameter
+    beaker_height: float = 0.09    # 90 mm tall
+    beaker_mass: float = 0.55      # kg, beaker+liquid
 
     # Bench collision AABB (URDF frame: x=forward, y=left, z=up)
     bench_x_min: float = 0.15
     bench_x_max: float = 0.85
     bench_y_min: float = -0.05
     bench_y_max: float = 0.55
-    bench_z_top: float = 0.77  # slightly above bench surface (col margin)
+    bench_z_top: float = 0.77  # slightly above surface (collision margin)
+
+    # ── Gripper geometry ───────────────────────────────────
+    finger_closed_offset: float = 0.008   # metres each side at q=0
+    finger_max_travel: float = 0.040      # metres per finger
+    grasp_gap_tolerance: float = 0.010    # gap tolerance for grasping
+    grasp_proximity_xy: float = 0.04      # XY distance threshold
+    grasp_proximity_z:  float = 0.05      # Z distance threshold
 
     # ── Joint velocity scaling ─────────────────────────────
-    # Policy outputs in [-1, 1], scaled by these per-joint max velocities
-    max_joint_velocity: tuple[float, ...] = (2.094, 2.094, 3.142, 3.491, 3.491, 3.491)
+    max_joint_velocity: tuple[float, ...] = (
+        2.094, 2.094, 3.142, 3.491, 3.491, 3.491)
 
     # ── Pouring physics ────────────────────────────────────
-    pour_tilt_threshold_deg: float = 45.0   # flow starts at 45° tilt
-    pour_rate_max_ml_per_step: float = 1.5  # ~75 ml/s at 50 Hz
-    spill_tilt_threshold_deg: float = 20.0  # drips start at 20° (if not over glass)
+    pour_tilt_threshold_deg: float = 45.0
+    pour_rate_max_ml_per_step: float = 1.5
+    spill_tilt_threshold_deg: float = 20.0
     pour_xy_tolerance_m: float = 0.08
+    pour_arrive_distance: float = 0.10
+    lift_clearance: float = 0.08
 
-    # ── Reward weights (shaped for visible learning) ───────
-    reach_weight: float = 5.0
-    height_bonus_weight: float = 2.0
+    # ── Reward weights ─────────────────────────────────────
+    approach_weight: float = 8.0
+    grasp_bonus: float = 20.0
+    lift_weight: float = 6.0
     pour_progress_weight: float = 15.0
     spill_penalty_weight: float = 30.0
+    collision_penalty_weight: float = 50.0
+    orientation_weight: float = 4.0
     smoothness_weight: float = 0.3
     success_bonus: float = 100.0
     time_penalty: float = 0.05
-    collision_penalty_weight: float = 50.0   # big penalty for hitting bench
-    orientation_penalty_weight: float = 5.0  # keep beaker upright during REACH
 
     obs_dim: int = 56
-    action_dim: int = 7  # 6 joint velocities + 1 gripper (NO AMR base)
+    action_dim: int = 7  # 6 arm joint velocities + 1 gripper
+
+    # Legacy aliases used by old code
+    glass_position: tuple[float, float, float] = (0.60, 0.35, 0.78)
 
 
 # ─── Environment ──────────────────────────────────────────────────────────────
 
 @register_component("simulation", "pour_task")
 class PourTaskEnv(IsaacSimEnv):
-    """Chemical-liquid pouring with a URDF-driven UR5e on a fixed pedestal.
+    """Pick-and-pour with a URDF-driven UR5e + parallel-jaw gripper.
 
     Observation space (56-dim):
-        [joint_pos_norm(6), ee_pos(3), glass_pos(3),
-         wrist_tilt_sin, wrist_tilt_cos, grasped,
-         phase_onehot(2), fluid_in_beaker_frac, poured_frac,
-         spill_frac, ee_to_glass_dist, ee_to_glass_z_diff,
-         joint_velocities(6), prev_reward, ...context(18)]
+        [arm_joint_pos_norm(6), gripper_tip_pos(3),
+         source_beaker_pos(3), target_glass_pos(3),
+         beaker_tilt_sin, beaker_tilt_cos,
+         grasped, gripper_openness,
+         phase_onehot(4),
+         fluid_in_beaker_frac, poured_frac, spill_frac,
+         ee_to_beaker_xy, ee_to_beaker_z,
+         ee_to_glass_xy, ee_to_glass_z,
+         arm_joint_vel(6), prev_reward,
+         collision, ...context(18)]
 
     Action space (7-dim):
-        [j1_vel, j2_vel, j3_vel, j4_vel, j5_vel, j6_vel, gripper]
+        [j1_vel, j2_vel, j3_vel, j4_vel, j5_vel, j6_vel, gripper_cmd]
+        gripper_cmd: -1 = close, +1 = full open
     """
 
     def __init__(self, config: PourTaskConfig | None = None) -> None:
@@ -145,71 +176,102 @@ class PourTaskEnv(IsaacSimEnv):
 
         tc = self._task_config
 
-        # ── Load robot model from URDF (single source of truth) ──
+        # ── Load robot model from URDF ──
         self._urdf: URDFRobot = load_default_robot()
-        self._num_joints = len(self._urdf.actuated_joints)
-        assert self._num_joints == 6, f"Expected 6 actuated joints, got {self._num_joints}"
 
-        # Extract joint limits from URDF
+        # Separate arm joints from gripper (finger) joints
+        all_act = self._urdf.actuated_joints
+        self._arm_joint_names = [j for j in all_act if 'finger' not in j]
+        self._grip_joint_names = [j for j in all_act if 'finger' in j]
+        self._num_arm_joints = len(self._arm_joint_names)
+        self._num_grip_joints = len(self._grip_joint_names)
+        assert self._num_arm_joints == 6, (
+            f"Expected 6 arm joints, got {self._num_arm_joints}")
+
+        # Arm joint limits from URDF
         self._joint_lo = np.array([
-            self._urdf.joints[jn].lower for jn in self._urdf.actuated_joints
+            self._urdf.joints[jn].lower for jn in self._arm_joint_names
         ], dtype=np.float64)
         self._joint_hi = np.array([
-            self._urdf.joints[jn].upper for jn in self._urdf.actuated_joints
+            self._urdf.joints[jn].upper for jn in self._arm_joint_names
         ], dtype=np.float64)
-        self._max_jvel = np.array(tc.max_joint_velocity[:6], dtype=np.float64)
+        self._max_jvel = np.array(
+            tc.max_joint_velocity[:6], dtype=np.float64)
 
-        # ── Task state ──
-        self._poured_volume: float = 0.0
-        self._spilled_volume: float = 0.0
-        self._grasped: bool = True
-        self._phase: TaskPhase = TaskPhase.REACH
-        self._glass_pos = np.array(tc.glass_position, dtype=np.float64)
-        self._fluid_in_beaker: float = tc.source_volume_ml
-        self._wrist_tilt_deg: float = 0.0
+        # Finger joint limits
+        self._finger_lo = np.array([
+            self._urdf.joints[jn].lower for jn in self._grip_joint_names
+        ], dtype=np.float64)
+        self._finger_hi = np.array([
+            self._urdf.joints[jn].upper for jn in self._grip_joint_names
+        ], dtype=np.float64)
 
         # ── Kinematic state ──
         self._joint_pos = np.zeros(6, dtype=np.float64)
         self._joint_vel = np.zeros(6, dtype=np.float64)
+        self._finger_pos = np.zeros(self._num_grip_joints, dtype=np.float64)
         self._ee_pos = np.zeros(3, dtype=np.float64)
         self._ee_rot = np.eye(3)
-        self._beaker_pos = np.zeros(3, dtype=np.float64)
+        self._gripper_tip_pos = np.zeros(3, dtype=np.float64)
         self._gripper_openness: float = 0.0
+
+        # ── Task state ──
+        self._phase: TaskPhase = TaskPhase.APPROACH
+        self._grasped: bool = False
+        self._poured_volume: float = 0.0
+        self._spilled_volume: float = 0.0
+        self._fluid_in_beaker: float = tc.source_volume_ml
+        self._beaker_tilt_deg: float = 0.0
+        self._wrist_tilt_deg: float = 0.0  # legacy alias
+
+        # Source beaker (free object on bench)
+        self._beaker_pos = np.array(
+            tc.source_beaker_position, dtype=np.float64)
+        self._beaker_vel = np.zeros(3, dtype=np.float64)
+        self._beaker_on_bench: bool = True
+
+        # Target glass
+        self._glass_pos = np.array(
+            tc.target_glass_position, dtype=np.float64)
 
         # ── Collision state ──
         self._collision: bool = False
         self._max_penetration: float = 0.0
-        self._min_bench_clearance: float = 1.0  # min z above bench for any link
-        self._link_positions: dict[str, np.ndarray] = {}  # link → xyz
+        self._min_bench_clearance: float = 1.0
+        self._link_positions: dict[str, np.ndarray] = {}
 
         # ── Reward tracking ──
         self._prev_reward: float = 0.0
+        self._prev_ee_to_beaker: float = 1.0
         self._prev_ee_to_glass: float = 1.0
         self._episode_rewards: list = []
+        self._grasp_step: int = 0
 
-        # Backward compat: aliases used by server.py telemetry
+        # ── Backward compat aliases for server.py ──
         self._stub_joint_pos = self._joint_pos
         self._stub_ee_pos = self._ee_pos
-        self._stub_base_pos = np.zeros(3, dtype=np.float64)  # fixed pedestal
+        self._stub_base_pos = np.zeros(3, dtype=np.float64)
 
         # Reward function
         self._reward_fn = DynamicRewardFunction()
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
     # Scene
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
 
     def _setup_scene(self) -> None:
         if _ISAAC_AVAILABLE and self._world is not None:
             self._world.scene.add_default_ground_plane()
             logger.info("Pour task scene loaded (Isaac Sim).")
         else:
-            logger.info(f"Pour task scene loaded (stub, URDF={self._urdf.name}, "
-                        f"{self._num_joints} joints).")
+            logger.info(
+                f"Pour task scene loaded (stub, URDF={self._urdf.name}, "
+                f"{self._num_arm_joints} arm + "
+                f"{self._num_grip_joints} finger joints).")
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
     # Reset
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
 
     def _on_reset(self, options: dict | None = None) -> None:
         tc = self._task_config
@@ -218,362 +280,503 @@ class PourTaskEnv(IsaacSimEnv):
         self._poured_volume = 0.0
         self._spilled_volume = 0.0
         self._fluid_in_beaker = tc.source_volume_ml
+        self._beaker_tilt_deg = 0.0
         self._wrist_tilt_deg = 0.0
         self._prev_reward = 0.0
 
-        # Robot starts holding the beaker, gripper closed
-        self._grasped = True
-        self._gripper_openness = 0.0
-        self._phase = TaskPhase.REACH
+        # Phase
+        self._phase = TaskPhase.APPROACH
+        self._grasped = False
+        self._grasp_step = 0
 
-        # Collision state
+        # Collision
         self._collision = False
         self._max_penetration = 0.0
         self._min_bench_clearance = 1.0
 
-        # Glass on bench (with small domain randomization)
-        self._glass_pos = np.array(tc.glass_position, dtype=np.float64)
+        # Source beaker on bench (with domain randomization)
+        self._beaker_pos = np.array(
+            tc.source_beaker_position, dtype=np.float64)
+        self._beaker_pos[:2] += np.random.uniform(-0.03, 0.03, size=2)
+        self._beaker_vel = np.zeros(3, dtype=np.float64)
+        self._beaker_on_bench = True
+
+        # Target glass on bench
+        self._glass_pos = np.array(
+            tc.target_glass_position, dtype=np.float64)
         self._glass_pos[:2] += np.random.uniform(-0.03, 0.03, size=2)
 
-        # ── Initial joint config: beaker held UPRIGHT above bench ──
-        # This pose gives: tool_z ≈ (0,0,1), tilt ≈ 0°, EE above glass
-        self._joint_pos = np.array([0.4, -0.8, 1.2, -1.97, -1.5708, 0.0],
-                                    dtype=np.float64)
+        # Gripper starts OPEN (ready to approach)
+        self._gripper_openness = 1.0
+        self._finger_pos = self._finger_hi.copy()
+
+        # Home pose: tool pointing DOWN, above bench
+        # EE ≈ (0.728, 0.308, 1.065), gripper_tip z ≈ 0.942
+        self._joint_pos = np.array(
+            [0.4, -0.8, 1.2, -1.97, -1.5708, 3.14159],
+            dtype=np.float64)
         self._joint_vel = np.zeros(6, dtype=np.float64)
 
-        # Update aliases
+        # Aliases
         self._stub_joint_pos = self._joint_pos
         self._stub_base_pos = np.zeros(3, dtype=np.float64)
 
-        # FK from URDF
+        # FK
         self._update_kinematics()
-        self._beaker_pos = self._ee_pos.copy()
+        self._prev_ee_to_beaker = float(np.linalg.norm(
+            self._gripper_tip_pos[:2] - self._beaker_pos[:2]))
         self._prev_ee_to_glass = float(np.linalg.norm(
-            self._ee_pos[:2] - self._glass_pos[:2]))
+            self._gripper_tip_pos[:2] - self._glass_pos[:2]))
         self._episode_rewards = []
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Forward kinematics (from URDF — proper 3D)
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
+    # Forward kinematics
+    # ──────────────────────────────────────────────────────────────────
 
     def _update_kinematics(self) -> None:
-        """Recompute EE pose from current joints using URDF FK."""
-        transforms = forward_kinematics(self._urdf, self._joint_pos)
+        """Recompute EE/gripper poses from URDF FK."""
+        full_angles = np.concatenate([self._joint_pos, self._finger_pos])
+        transforms = forward_kinematics(self._urdf, full_angles)
+
+        # Tool0 (EE flange)
         tool_T = transforms.get("tool0", np.eye(4))
         self._ee_pos[:] = tool_T[:3, 3]
         self._ee_rot = tool_T[:3, :3].copy()
 
-        # Wrist tilt: angle between tool Z-axis and world up (0,0,1)
-        tool_z = self._ee_rot[:, 2]
-        cos_angle = np.clip(np.dot(tool_z, np.array([0, 0, 1])), -1, 1)
-        self._wrist_tilt_deg = float(np.degrees(np.arccos(cos_angle)))
+        # Gripper tip
+        tip_T = transforms.get("gripper_tip", tool_T)
+        self._gripper_tip_pos[:] = tip_T[:3, 3]
 
-        # Store all link positions for collision checks
+        # Beaker tilt: when grasped, open end = -tool_z
+        tool_z = self._ee_rot[:, 2]
+        if self._grasped:
+            beaker_up = -tool_z
+        else:
+            beaker_up = np.array([0.0, 0.0, 1.0])
+        cos_a = np.clip(np.dot(beaker_up, [0, 0, 1]), -1.0, 1.0)
+        self._beaker_tilt_deg = float(np.degrees(np.arccos(cos_a)))
+        self._wrist_tilt_deg = self._beaker_tilt_deg
+
+        # Link positions for collision
         self._link_positions = {}
         for name, T in transforms.items():
             self._link_positions[name] = T[:3, 3].copy()
 
-        # Check bench collision
         self._check_bench_collision()
-
-        # Keep alias in sync
         self._stub_ee_pos = self._ee_pos
+        self._stub_joint_pos = self._joint_pos
 
     def _check_bench_collision(self) -> None:
-        """Check if any moving link intersects the bench volume."""
+        """Check if any moving link intersects the bench AABB."""
         tc = self._task_config
         self._collision = False
         self._max_penetration = 0.0
-        self._min_bench_clearance = 10.0  # large default
+        self._min_bench_clearance = 10.0
 
-        # Skip fixed base links — only check moving parts
         skip = {'world', 'pedestal', 'base_link'}
         for name, pos in self._link_positions.items():
             if name in skip:
                 continue
             x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
-
-            # Is this link within the bench footprint (XY)?
             in_x = tc.bench_x_min <= x <= tc.bench_x_max
             in_y = tc.bench_y_min <= y <= tc.bench_y_max
-
             if in_x and in_y:
                 clearance = z - tc.bench_z_top
-                self._min_bench_clearance = min(self._min_bench_clearance, clearance)
+                self._min_bench_clearance = min(
+                    self._min_bench_clearance, clearance)
                 if clearance < 0:
                     self._collision = True
-                    self._max_penetration = max(self._max_penetration, -clearance)
+                    self._max_penetration = max(
+                        self._max_penetration, -clearance)
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
+    # Gripper helpers
+    # ──────────────────────────────────────────────────────────────────
+
+    def _finger_gap(self) -> float:
+        """Current gap between finger pads (metres)."""
+        tc = self._task_config
+        return 2.0 * (tc.finger_closed_offset + self._finger_pos[0])
+
+    def _check_grasp(self) -> bool:
+        """Check if gripper has grasped the source beaker."""
+        tc = self._task_config
+
+        if self._grasped:
+            # Release check
+            if self._gripper_openness > 0.85:
+                return False
+            return True
+
+        # Proximity
+        tip = self._gripper_tip_pos
+        bk = self._beaker_pos
+        dxy = float(np.linalg.norm(tip[:2] - bk[:2]))
+        dz = abs(tip[2] - bk[2])
+        if dxy > tc.grasp_proximity_xy or dz > tc.grasp_proximity_z:
+            return False
+
+        # Finger closure
+        gap = self._finger_gap()
+        beaker_diam = 2.0 * tc.beaker_radius
+        if gap > beaker_diam + tc.grasp_gap_tolerance:
+            return False
+        if gap < beaker_diam * 0.4:
+            return False
+
+        # Must be on bench still
+        if not self._beaker_on_bench:
+            return False
+
+        return True
+
+    # ──────────────────────────────────────────────────────────────────
     # Observation
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
 
     def _compute_obs(self) -> np.ndarray:
-        """Build the 56-dim observation."""
+        """Build 56-dim observation."""
         obs = np.zeros(self._task_config.obs_dim, dtype=np.float32)
         tc = self._task_config
         total = tc.source_volume_ml if tc.source_volume_ml > 0 else 1.0
 
-        # Joint positions (normalized to [-1, 1] by URDF limits)
+        # [0:6] Arm joints normalised
         for i in range(6):
             rng = self._joint_hi[i] - self._joint_lo[i]
             if rng > 0:
-                obs[i] = 2.0 * (self._joint_pos[i] - self._joint_lo[i]) / rng - 1.0
+                obs[i] = (2.0 * (self._joint_pos[i] - self._joint_lo[i])
+                          / rng - 1.0)
 
-        # EE position (world frame)
-        obs[6:9] = self._ee_pos
+        # [6:9] Gripper tip position
+        obs[6:9] = self._gripper_tip_pos
+        # [9:12] Source beaker
+        obs[9:12] = self._beaker_pos
+        # [12:15] Target glass
+        obs[12:15] = self._glass_pos
 
-        # Glass position
-        obs[9:12] = self._glass_pos
+        # [15:17] Beaker tilt sin/cos
+        tilt_rad = np.radians(self._beaker_tilt_deg)
+        obs[15] = np.sin(tilt_rad)
+        obs[16] = np.cos(tilt_rad)
 
-        # Wrist tilt (sin/cos encoding)
-        tilt_rad = np.radians(self._wrist_tilt_deg)
-        obs[12] = np.sin(tilt_rad)
-        obs[13] = np.cos(tilt_rad)
+        # [17] Grasped
+        obs[17] = 1.0 if self._grasped else 0.0
+        # [18] Gripper openness
+        obs[18] = self._gripper_openness
 
-        # Grasped flag
-        obs[14] = 1.0 if self._grasped else 0.0
+        # [19:23] Phase one-hot
+        phase_map = {
+            TaskPhase.APPROACH: 19, TaskPhase.GRASP: 20,
+            TaskPhase.LIFT: 21, TaskPhase.POUR: 22}
+        if self._phase in phase_map:
+            obs[phase_map[self._phase]] = 1.0
 
-        # Phase one-hot (REACH / POUR)
-        if self._phase == TaskPhase.REACH:
-            obs[15] = 1.0
-        elif self._phase == TaskPhase.POUR:
-            obs[16] = 1.0
+        # [23:26] Fluid fractions
+        obs[23] = self._fluid_in_beaker / total
+        obs[24] = self._poured_volume / total
+        obs[25] = self._spilled_volume / total
 
-        # Fluid fractions
-        obs[17] = self._fluid_in_beaker / total
-        obs[18] = self._poured_volume / total
-        obs[19] = self._spilled_volume / total
+        # [26:30] Distances
+        tip = self._gripper_tip_pos
+        obs[26] = float(np.linalg.norm(tip[:2] - self._beaker_pos[:2]))
+        obs[27] = tip[2] - self._beaker_pos[2]
+        obs[28] = float(np.linalg.norm(tip[:2] - self._glass_pos[:2]))
+        obs[29] = tip[2] - self._glass_pos[2]
 
-        # Distance features
-        ee_to_glass_xy = float(np.linalg.norm(self._ee_pos[:2] - self._glass_pos[:2]))
-        ee_to_glass_z = self._ee_pos[2] - self._glass_pos[2]
-        obs[20] = ee_to_glass_xy
-        obs[21] = ee_to_glass_z
+        # [30:36] Joint velocities
+        obs[30:36] = self._joint_vel / (self._max_jvel + 1e-8)
+        # [36] Previous reward
+        obs[36] = np.clip(self._prev_reward / 20.0, -1.0, 1.0)
+        # [37] Collision
+        obs[37] = 1.0 if self._collision else 0.0
 
-        # Joint velocities
-        obs[22:28] = self._joint_vel / (self._max_jvel + 1e-8)
-
-        # Previous reward (helps correlate actions → outcomes)
-        obs[28] = np.clip(self._prev_reward / 20.0, -1.0, 1.0)
-
-        # Collision / environment awareness (indices 29-34)
-        obs[29] = 1.0 if self._collision else 0.0
-        obs[30] = np.clip(self._min_bench_clearance / 0.5, -1.0, 1.0)
-        obs[31] = self._wrist_tilt_deg / 180.0  # 0=upright, 0.5=horizontal, 1=inverted
-        obs[32] = self._max_penetration * 10.0  # scale up for visibility
-        obs[33] = 1.0 if (self._phase == TaskPhase.REACH and self._wrist_tilt_deg > 15.0) else 0.0
-        obs[34] = np.clip(float(np.linalg.norm(self._ee_pos[:2] - self._glass_pos[:2])) / 0.5, 0, 1)
-
-        # Context (indices 38-55)
-        obs[38:41] = self._ee_pos
-        obs[41:44] = self._glass_pos
-        obs[44] = self._poured_volume / total
-        obs[45] = self._spilled_volume / total
-        obs[46] = self._wrist_tilt_deg / 180.0
-        obs[47] = float(self._phase == TaskPhase.POUR)
+        # [38:56] Context
+        obs[38:41] = self._gripper_tip_pos
+        obs[41:44] = self._beaker_pos
+        obs[44:47] = self._glass_pos
+        obs[47] = self._poured_volume / total
+        obs[48] = self._spilled_volume / total
+        obs[49] = self._beaker_tilt_deg / 180.0
+        obs[50] = float(self._phase == TaskPhase.POUR)
+        obs[51] = float(self._grasped)
+        obs[52] = self._gripper_openness
+        obs[53] = float(self._beaker_on_bench)
+        obs[54] = np.clip(self._min_bench_clearance / 0.5, -1.0, 1.0)
+        obs[55] = self._max_penetration * 10.0
 
         return obs
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Reward — shaped for VISIBLE learning progress
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
+    # Reward — shaped for VISIBLE learning on pick-and-pour
+    # ──────────────────────────────────────────────────────────────────
 
     def _compute_reward(self, action: np.ndarray) -> float:
         tc = self._task_config
         total = tc.source_volume_ml if tc.source_volume_ml > 0 else 1.0
         reward = 0.0
 
-        ee = self._ee_pos
-        d_glass_xy = float(np.linalg.norm(ee[:2] - self._glass_pos[:2]))
-        d_glass_z = abs(ee[2] - self._glass_pos[2] - 0.10)
+        tip = self._gripper_tip_pos
+        bk = self._beaker_pos
+        gl = self._glass_pos
+
+        d_bk_xy = float(np.linalg.norm(tip[:2] - bk[:2]))
+        d_bk_z = abs(tip[2] - bk[2])
+        d_gl_xy = float(np.linalg.norm(tip[:2] - gl[:2]))
         poured_frac = self._poured_volume / total
         spill_frac = self._spilled_volume / total
         target_frac = tc.target_volume_ml / total
 
-        # ── 0) COLLISION PENALTY (critical — must learn to avoid bench) ──
+        # ── 0) Collision penalty ──
         if self._collision:
-            reward -= tc.collision_penalty_weight * (1.0 + self._max_penetration * 10.0)
-        elif self._min_bench_clearance < 0.05:
-            # Soft penalty: getting dangerously close to bench
-            reward -= tc.collision_penalty_weight * 0.3 * (0.05 - self._min_bench_clearance) / 0.05
+            reward -= tc.collision_penalty_weight * (
+                1.0 + self._max_penetration * 10.0)
+        elif self._min_bench_clearance < 0.03:
+            reward -= tc.collision_penalty_weight * 0.2 * (
+                0.03 - self._min_bench_clearance) / 0.03
 
-        # ── 1) ORIENTATION PENALTY during REACH ──
-        # Beaker MUST stay upright while reaching (tilt < 10°)
-        if self._phase == TaskPhase.REACH:
-            tilt_excess = max(0.0, self._wrist_tilt_deg - 10.0)
-            reward -= tc.orientation_penalty_weight * (tilt_excess / 80.0)
-            # Bonus for keeping beaker upright
-            if self._wrist_tilt_deg < 5.0:
-                reward += 0.5
+        # ── Phase-specific rewards ──
 
-        # ── 2) Dense reach reward: closing distance to glass ──
-        approach_improvement = self._prev_ee_to_glass - d_glass_xy
-        reward += tc.reach_weight * approach_improvement * 10.0
-        if d_glass_xy < 0.5:
-            reward += tc.reach_weight * (0.5 - d_glass_xy)
+        if self._phase == TaskPhase.APPROACH:
+            # Dense approach reward
+            delta = self._prev_ee_to_beaker - d_bk_xy
+            reward += tc.approach_weight * delta * 10.0
+            if d_bk_xy < 0.3:
+                reward += tc.approach_weight * (0.3 - d_bk_xy) * 2.0
+            if d_bk_z < 0.1:
+                reward += 2.0 * (0.1 - d_bk_z) / 0.1
+            # Keep gripper open
+            reward += 0.5 * self._gripper_openness
+            # Tool should point down
+            if self._beaker_tilt_deg < 30.0:
+                reward += 1.0
+            else:
+                reward -= tc.orientation_weight * (
+                    self._beaker_tilt_deg - 30.0) / 150.0
 
-        # ── 3) Height bonus: right altitude for pouring ──
-        # Want EE 5-15cm above glass, NOT below bench level
-        if d_glass_z < 0.15:
-            reward += tc.height_bonus_weight * (0.15 - d_glass_z) / 0.15
-        if ee[2] < tc.bench_z_top:
-            reward -= 5.0  # below bench surface
+        elif self._phase == TaskPhase.GRASP:
+            if self._grasped:
+                reward += tc.grasp_bonus
+            else:
+                reward += 2.0 * (1.0 - self._gripper_openness)
+                if d_bk_xy < tc.grasp_proximity_xy:
+                    reward += 3.0
 
-        # ── 4) Pour progress reward (only in POUR phase) ──
-        if self._phase == TaskPhase.POUR:
+        elif self._phase == TaskPhase.LIFT:
+            lift_h = self._beaker_pos[2] - tc.bench_z_top
+            if lift_h > 0:
+                reward += tc.lift_weight * min(
+                    lift_h / tc.lift_clearance, 1.0)
+            if self._beaker_tilt_deg < 10.0:
+                reward += 1.0
+            elif self._beaker_tilt_deg > 20.0:
+                reward -= tc.orientation_weight * (
+                    self._beaker_tilt_deg - 20.0) / 160.0
+
+        elif self._phase == TaskPhase.POUR:
+            glass_delta = self._prev_ee_to_glass - d_gl_xy
+            reward += tc.approach_weight * glass_delta * 5.0
             reward += tc.pour_progress_weight * poured_frac
-            # Bonus for being positioned correctly over glass while pouring
-            if d_glass_xy < tc.pour_xy_tolerance_m:
+            if d_gl_xy < tc.pour_xy_tolerance_m:
                 reward += 3.0
-                # Additional bonus for controlled tilt (45-100°)
-                if 45 <= self._wrist_tilt_deg <= 120:
+                if 45 <= self._beaker_tilt_deg <= 120:
                     reward += 2.0
             else:
-                reward -= 3.0 * (d_glass_xy - tc.pour_xy_tolerance_m)
+                reward -= 2.0 * (d_gl_xy - tc.pour_xy_tolerance_m)
 
-        # ── 5) Spill penalty (always, but proportional) ──
+        # ── Always-on ──
         reward -= tc.spill_penalty_weight * spill_frac
-
-        # ── 6) Smoothness ──
         action_mag = float(np.sum(action[:6] ** 2))
         reward -= tc.smoothness_weight * action_mag * 0.01
-
-        # ── 7) Time penalty ──
         reward -= tc.time_penalty
 
-        # ── 8) Success bonus ──
-        if poured_frac >= target_frac * 0.90 and spill_frac < tc.max_spill_fraction:
+        if (poured_frac >= target_frac * 0.90
+                and spill_frac < tc.max_spill_fraction):
             reward += tc.success_bonus
 
-        # Track for next step
-        self._prev_ee_to_glass = d_glass_xy
+        self._prev_ee_to_beaker = d_bk_xy
+        self._prev_ee_to_glass = d_gl_xy
         self._prev_reward = reward
         self._episode_rewards.append(reward)
-
         return float(reward)
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
     # Termination
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
 
     def _check_terminated(self) -> bool:
         tc = self._task_config
         total = tc.source_volume_ml if tc.source_volume_ml > 0 else 1.0
 
         # Success
-        if self._poured_volume / total >= (tc.target_volume_ml / total) * 0.90:
+        if self._poured_volume / total >= (
+                tc.target_volume_ml / total) * 0.90:
             self._phase = TaskPhase.DONE
             return True
-
-        # Failure: bench collision (severe penetration)
+        # Collision
         if self._collision and self._max_penetration > 0.02:
             return True
-
-        # Failure: too much spillage
+        # Too much spill
         if self._spilled_volume / total > tc.max_spill_fraction * 2:
             return True
-
-        # Failure: beaker empty, didn't pour enough
-        if self._fluid_in_beaker <= 0 and self._poured_volume / total < 0.5:
+        # Beaker empty without enough pour
+        if (self._fluid_in_beaker <= 0
+                and self._poured_volume / total < 0.5):
             return True
-
-        # Failure: EE too low (floor crash)
+        # EE too low
         if self._ee_pos[2] < 0.2:
             return True
-
+        # Beaker fell to floor
+        if (not self._grasped and not self._beaker_on_bench
+                and self._beaker_pos[2] < 0.1):
+            return True
         return False
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Stub physics step — URDF kinematics, no AMR
-    # ──────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
+    # Stub physics step — gripper + free beaker + collision
+    # ──────────────────────────────────────────────────────────────────
 
     def _stub_step(self, action: np.ndarray) -> None:
-        """Physics step using URDF FK.  No AMR base.
+        """Physics step with gripper + free beaker + collision.
 
-        Action: [j1_vel..j6_vel, gripper] — 7 dims.
+        Action: [j1..j6 velocity, gripper_cmd] — 7 dims.
+        gripper_cmd: -1 = close, +1 = full open
         """
         action = np.asarray(action, dtype=np.float64)
         if action.shape[0] < 7:
             action = np.pad(action, (0, 7 - action.shape[0]))
 
         tc = self._task_config
-        dt = tc.dt  # 0.02 s
+        dt = tc.dt
 
-        # 1. Joint velocities (scaled, clamped, with URDF damping)
+        # ── 1. Arm joints ──
         raw_vel = action[:6] * self._max_jvel
         clamped_vel = np.clip(raw_vel, -self._max_jvel, self._max_jvel)
-        for i, jname in enumerate(self._urdf.actuated_joints):
+        for i, jname in enumerate(self._arm_joint_names):
             damp = self._urdf.joints[jname].damping
             clamped_vel[i] -= damp * self._joint_vel[i] * dt
 
         new_joints = self._joint_pos + clamped_vel * dt
-        self._joint_pos = np.clip(new_joints, self._joint_lo, self._joint_hi)
+        self._joint_pos = np.clip(
+            new_joints, self._joint_lo, self._joint_hi)
         self._joint_vel = clamped_vel.copy()
 
-        # Update alias
-        self._stub_joint_pos = self._joint_pos
+        # ── 2. Gripper finger control ──
+        grip_cmd = float(np.clip(action[6], -1.0, 1.0))
+        target = (grip_cmd + 1.0) / 2.0  # map to [0,1]
+        grip_speed = 3.0
+        delta = (target - self._gripper_openness) * min(
+            1.0, grip_speed * dt)
+        self._gripper_openness = float(np.clip(
+            self._gripper_openness + delta, 0.0, 1.0))
+        self._finger_pos = (self._finger_lo
+            + (self._finger_hi - self._finger_lo) * self._gripper_openness)
 
-        # 2. Forward kinematics from URDF (also checks bench collision)
+        # ── 3. FK + collision ──
         self._update_kinematics()
-
-        # 2b. Bench repulsion: if a link penetrates the bench, push joints back
         if self._collision:
-            # Revert to pre-step joints (simple collision response)
             self._joint_pos = np.clip(
-                self._joint_pos - clamped_vel * dt * 0.5,  # half-revert
-                self._joint_lo, self._joint_hi
-            )
+                self._joint_pos - clamped_vel * dt * 0.5,
+                self._joint_lo, self._joint_hi)
             self._update_kinematics()
 
-        # 3. Gripper
-        self._gripper_openness = float(np.clip(action[6], 0, 1))
-        self._grasped = self._gripper_openness < 0.5
+        # ── 4. Grasp detection ──
+        was_grasped = self._grasped
+        self._grasped = self._check_grasp()
+        if self._grasped and not was_grasped:
+            self._grasp_step = self.num_steps
 
-        # 4. Beaker follows EE
+        # ── 5. Source beaker physics ──
         if self._grasped:
-            self._beaker_pos = self._ee_pos.copy()
+            self._beaker_pos[:] = self._gripper_tip_pos
+            self._beaker_vel[:] = 0.0
+            self._beaker_on_bench = False
+        else:
+            # Gravity
+            self._beaker_vel[2] += -9.81 * dt
+            self._beaker_pos += self._beaker_vel * dt
 
-        # 5. Phase transitions
-        # REACH → POUR: based on position only (close + above glass)
-        # The policy must then decide to tilt for pouring
-        ee_to_glass_xy = float(np.linalg.norm(
-            self._ee_pos[:2] - self._glass_pos[:2]))
+            # Bench support
+            bx, by = self._beaker_pos[0], self._beaker_pos[1]
+            on_xy = (tc.bench_x_min < bx < tc.bench_x_max
+                     and tc.bench_y_min < by < tc.bench_y_max)
+            beaker_bottom = self._beaker_pos[2] - tc.beaker_height / 2.0
+            bench_surface = tc.bench_height + 0.02
 
-        if self._phase == TaskPhase.REACH:
-            if (ee_to_glass_xy < tc.pour_arrive_distance
-                    and self._ee_pos[2] > self._glass_pos[2]):
+            if on_xy and beaker_bottom <= bench_surface:
+                self._beaker_pos[2] = bench_surface + tc.beaker_height / 2.0
+                self._beaker_vel[2] = max(0.0, self._beaker_vel[2])
+                self._beaker_vel[:2] *= 0.9  # friction
+                self._beaker_on_bench = True
+            elif self._beaker_pos[2] < 0.01:
+                self._beaker_pos[2] = 0.01
+                self._beaker_vel[:] = 0.0
+                self._beaker_on_bench = False
+
+        # ── 6. Phase transitions ──
+        tip = self._gripper_tip_pos
+        d_bk_xy = float(np.linalg.norm(tip[:2] - self._beaker_pos[:2]))
+        d_bk_z = abs(tip[2] - self._beaker_pos[2])
+
+        if self._phase == TaskPhase.APPROACH:
+            if (d_bk_xy < tc.grasp_proximity_xy * 1.5
+                    and d_bk_z < tc.grasp_proximity_z * 1.5):
+                self._phase = TaskPhase.GRASP
+
+        elif self._phase == TaskPhase.GRASP:
+            if self._grasped:
+                self._phase = TaskPhase.LIFT
+            elif d_bk_xy > tc.grasp_proximity_xy * 3.0:
+                self._phase = TaskPhase.APPROACH
+
+        elif self._phase == TaskPhase.LIFT:
+            if not self._grasped:
+                self._phase = TaskPhase.APPROACH
+            elif self._beaker_pos[2] > tc.bench_z_top + tc.lift_clearance:
                 self._phase = TaskPhase.POUR
 
-        # 6. Fluid dynamics with gravity
-        if self._fluid_in_beaker > 0:
-            over_glass = ee_to_glass_xy < tc.pour_xy_tolerance_m
-            tilt = self._wrist_tilt_deg
+        elif self._phase == TaskPhase.POUR:
+            if not self._grasped:
+                self._phase = TaskPhase.APPROACH
+
+        # ── 7. Fluid dynamics ──
+        if self._fluid_in_beaker > 0 and self._grasped:
+            d_gl_xy = float(np.linalg.norm(
+                self._beaker_pos[:2] - self._glass_pos[:2]))
+            over_glass = d_gl_xy < tc.pour_xy_tolerance_m
+            tilt = self._beaker_tilt_deg
 
             if tilt > tc.pour_tilt_threshold_deg:
                 tilt_frac = min(1.0,
                     (tilt - tc.pour_tilt_threshold_deg)
                     / (90.0 - tc.pour_tilt_threshold_deg))
-                gravity_factor = 0.5 + 0.5 * (tilt_frac ** 0.5)
-                flow_ml = tc.pour_rate_max_ml_per_step * tilt_frac * gravity_factor
-                flow_ml = min(flow_ml, self._fluid_in_beaker)
-                self._fluid_in_beaker -= flow_ml
+                grav_f = 0.5 + 0.5 * (tilt_frac ** 0.5)
+                flow = tc.pour_rate_max_ml_per_step * tilt_frac * grav_f
+                flow = min(flow, self._fluid_in_beaker)
+                self._fluid_in_beaker -= flow
 
-                if over_glass and self._ee_pos[2] > self._glass_pos[2]:
-                    accuracy = max(0.5, 1.0 - ee_to_glass_xy / tc.pour_xy_tolerance_m)
-                    self._poured_volume += flow_ml * accuracy
-                    self._spilled_volume += flow_ml * (1.0 - accuracy)
+                if over_glass and self._beaker_pos[2] > self._glass_pos[2]:
+                    acc = max(0.5,
+                        1.0 - d_gl_xy / tc.pour_xy_tolerance_m)
+                    self._poured_volume += flow * acc
+                    self._spilled_volume += flow * (1.0 - acc)
                 else:
-                    self._spilled_volume += flow_ml
+                    self._spilled_volume += flow
 
             elif tilt > tc.spill_tilt_threshold_deg:
-                drip_rate = 0.03 * (tilt - tc.spill_tilt_threshold_deg) / 10.0
-                drip = min(drip_rate, self._fluid_in_beaker)
+                drip = 0.03 * (tilt - tc.spill_tilt_threshold_deg) / 10.0
+                drip = min(drip, self._fluid_in_beaker)
                 self._fluid_in_beaker -= drip
                 self._spilled_volume += drip
 
-        # 7. Cap volumes
-        total = tc.source_volume_ml
-        self._poured_volume = float(np.clip(self._poured_volume, 0, total))
-        self._spilled_volume = float(np.clip(self._spilled_volume, 0, total))
-        self._fluid_in_beaker = float(np.clip(self._fluid_in_beaker, 0, total))
+        elif self._fluid_in_beaker > 0 and not self._grasped:
+            if not self._beaker_on_bench and self._beaker_pos[2] < 0.5:
+                spill = min(5.0, self._fluid_in_beaker)
+                self._fluid_in_beaker -= spill
+                self._spilled_volume += spill
+
+        # Cap
+        vol = tc.source_volume_ml
+        self._poured_volume = float(np.clip(self._poured_volume, 0, vol))
+        self._spilled_volume = float(np.clip(self._spilled_volume, 0, vol))
+        self._fluid_in_beaker = float(np.clip(
+            self._fluid_in_beaker, 0, vol))
