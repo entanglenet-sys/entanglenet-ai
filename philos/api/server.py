@@ -134,6 +134,11 @@ async def _run_simulation_loop() -> None:
             await _broadcast_telemetry({
                 "type": "sim_episode_start",
                 "episode": episode,
+                "beaker_pos": env._beaker_pos.tolist(),
+                "glass_pos": env._glass_pos.tolist(),
+                "joints": (env._joint_pos.tolist() + env._finger_pos.tolist()),
+                "grasped": False,
+                "phase": "approach",
             })
 
             while not done and _sim_running:

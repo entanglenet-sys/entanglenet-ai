@@ -216,7 +216,7 @@
     </div>
     <div class="uptime" id="uptimeDisplay">Connecting...</div>
     <h2 style="margin-top:16px"><span class="dot" id="jointDot"></span> Joint Positions (live rad)</h2>
-    <div id="jointBars" style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px"></div>
+    <div id="jointBars" style="display:grid;grid-template-columns:repeat(8,1fr);gap:6px"></div>
     <h2 style="margin-top:16px"><span class="dot" id="actDot"></span> Action Vector (live)</h2>
     <div id="actionBars" style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px"></div>
   </div>
@@ -260,7 +260,7 @@ const SIM = {
   done: false, safetyOk: true,
   // Physical state
   phase: 'approach',
-  beakerPos: [0.35, 0.10, 0.825],
+  beakerPos: [0.35, 0.10, 0.815],
   glassPos: [0.60, 0.35, 0.78],
   beakerTiltDeg: 0,
   fluidInBeaker: 250,
@@ -297,7 +297,7 @@ const SIM = {
 
   const BENCH_H = 0.75;
   const GLASS_POS_DEFAULT = [0.60, 0.35, 0.78];
-  const SRC_BEAKER_DEFAULT = [0.35, 0.10, 0.825];
+  const SRC_BEAKER_DEFAULT = [0.35, 0.10, 0.815];
 
   /* ── Renderer ────────────────────────────────────────────────────────── */
   const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
@@ -348,7 +348,7 @@ const SIM = {
   const matFluid = new THREE.MeshStandardMaterial({ color:0x00ccff, roughness:0.2, metalness:0.1, transparent:true, opacity:0.7, emissive:0x004466, emissiveIntensity:0.4 });
   const matJoint = new THREE.MeshStandardMaterial({ color:0x556070, roughness:0.2, metalness:0.9 });
   const matGripper = new THREE.MeshStandardMaterial({ color:0xcc44ff, roughness:0.3, metalness:0.7, emissive:0x330066, emissiveIntensity:0.4 });
-  const matBeaker = new THREE.MeshPhysicalMaterial({ color:0xcceeFF, roughness:0.05, metalness:0.0, transmission:0.8, thickness:0.5, transparent:true, opacity:0.35, side:THREE.DoubleSide });
+  const matBeaker = new THREE.MeshPhysicalMaterial({ color:0xcceeFF, roughness:0.1, metalness:0.05, transmission:0.4, thickness:0.8, transparent:true, opacity:0.55, side:THREE.DoubleSide });
 
   // Color map for URDF link materials
   function colorFromRGBA(rgba) {
@@ -402,16 +402,17 @@ const SIM = {
   const srcBeakerGroup = new THREE.Group();
   const srcBeakerBody = new THREE.Mesh(
     new THREE.CylinderGeometry(0.035, 0.030, 0.09, 24, 1, true), matBeaker);
-  srcBeakerBody.position.y = 0.045; srcBeakerGroup.add(srcBeakerBody);
+  srcBeakerBody.position.y = 0; srcBeakerGroup.add(srcBeakerBody);
   const srcBeakerBottom = new THREE.Mesh(
     new THREE.CylinderGeometry(0.030, 0.030, 0.003, 24), matBeaker);
-  srcBeakerBottom.position.y = 0.001; srcBeakerGroup.add(srcBeakerBottom);
+  srcBeakerBottom.position.y = -0.044; srcBeakerGroup.add(srcBeakerBottom);
   const srcBeakerFluid = new THREE.Mesh(
     new THREE.CylinderGeometry(0.033, 0.028, 0.085, 24), matFluid);
-  srcBeakerFluid.position.y = 0.043; srcBeakerGroup.add(srcBeakerFluid);
+  srcBeakerFluid.position.y = 0; srcBeakerGroup.add(srcBeakerFluid);
   // Initial position (URDF x,y,z → Three.js x,z,y)
   srcBeakerGroup.position.set(SRC_BEAKER_DEFAULT[0], SRC_BEAKER_DEFAULT[2], SRC_BEAKER_DEFAULT[1]);
   scene.add(srcBeakerGroup);
+  let beakerAttached = false;  // track gripper parenting state
 
   /* ── URDF robot model — built from fetched JSON ──────────────────────── */
   const linkMeshes = {};  // link_name → THREE.Group
@@ -433,7 +434,8 @@ const SIM = {
         if (v.shape === 'cylinder') {
           geom = new THREE.CylinderGeometry(v.radius, v.radius, v.length, 20);
         } else if (v.shape === 'box') {
-          geom = new THREE.BoxGeometry(v.size[0], v.size[1], v.size[2]);
+          // URDF (x,y,z) → Three.js (x,z,y): swap height↔depth
+          geom = new THREE.BoxGeometry(v.size[0], v.size[2], v.size[1]);
         } else if (v.shape === 'sphere') {
           geom = new THREE.SphereGeometry(v.radius, 16, 12);
         }
@@ -583,18 +585,28 @@ const SIM = {
     if (urdfLoaded) {
       updateJoints(SIM.joints);
 
-      // Source beaker: track position from telemetry (URDF xyz → Three.js xzy)
-      if (SIM.beakerPos) {
-        srcBeakerGroup.position.set(
-          SIM.beakerPos[0], SIM.beakerPos[2], SIM.beakerPos[1]);
-        // Match gripper orientation when grasped
-        if (SIM.grasped && linkMeshes['gripper_tip']) {
-          const tipQ = new THREE.Quaternion();
-          linkMeshes['gripper_tip'].getWorldQuaternion(tipQ);
-          srcBeakerGroup.quaternion.copy(tipQ);
-        } else {
-          srcBeakerGroup.quaternion.identity();
-        }
+      // Source beaker: parent to gripper_tip when grasped for perfect sync
+      if (SIM.grasped && !beakerAttached && linkMeshes['gripper_tip']) {
+        // Detach from scene, attach to gripper_tip link
+        scene.remove(srcBeakerGroup);
+        linkMeshes['gripper_tip'].add(srcBeakerGroup);
+        // Position at gripper tip center, with small downward offset for beaker COM
+        srcBeakerGroup.position.set(0, 0.01, 0);
+        srcBeakerGroup.quaternion.identity();
+        beakerAttached = true;
+      } else if (!SIM.grasped && beakerAttached) {
+        // Released — detach from gripper, put back in scene
+        linkMeshes['gripper_tip'].remove(srcBeakerGroup);
+        scene.add(srcBeakerGroup);
+        srcBeakerGroup.quaternion.identity();
+        beakerAttached = false;
+      }
+      // When free (not attached), update world position from simulation
+      if (!beakerAttached && SIM.beakerPos) {
+        // URDF (x,y,z) → Three.js (x,z,y).  When on bench, snap to bench surface.
+        const bkY = SIM.beakerOnBench ? (BENCH_H + 0.02 + 0.045) : SIM.beakerPos[2];
+        srcBeakerGroup.position.set(SIM.beakerPos[0], bkY, SIM.beakerPos[1]);
+        srcBeakerGroup.quaternion.identity();
       }
 
       // Source beaker fluid level
@@ -684,7 +696,7 @@ const SIM = {
 })();
 
 /* ─── Joint & Action bar visualisations ────────────────────────────────── */
-const jNames=['J1','J2','J3','J4','J5','J6'];
+const jNames=['J1','J2','J3','J4','J5','J6','LF','RF'];
 const aNames=['j1','j2','j3','j4','j5','j6','grip'];
 function initBars(){
   document.getElementById('jointBars').innerHTML=jNames.map((_,i)=>`
@@ -695,6 +707,7 @@ function initBars(){
       </div>
       <div style="font-size:.62rem;color:var(--text2);margin-top:2px">${jNames[i]}</div>
     </div>`).join('');
+    document.getElementById('jointBars').style.gridTemplateColumns = 'repeat(8,1fr)';
   document.getElementById('actionBars').innerHTML=aNames.map((_,i)=>`
     <div style="text-align:center">
       <div style="height:38px;position:relative;background:var(--bg);border-radius:4px;overflow:hidden">
@@ -707,8 +720,8 @@ function initBars(){
 initBars();
 
 function updateBars(){
-  for(let i=0;i<6;i++){
-    const v=SIM.joints[i]||0;const p=Math.min(Math.abs(v)/1.5*100,100);
+  for(let i=0;i<8;i++){
+    const v=SIM.joints[i]||0;const p=Math.min(Math.abs(v)/(i<6?1.5:0.04)*100,100);
     const b=document.getElementById('jbar'+i),l=document.getElementById('jval'+i);
     if(b){b.style.height=p+'%';b.style.background=v>=0?'linear-gradient(0deg,#00e5ff44,#7c4dff44)':'linear-gradient(0deg,#ff174444,#ff910044)'}
     if(l)l.textContent=v.toFixed(3);
@@ -789,6 +802,29 @@ function connectWS(){
         if(!d.safety_ok) addTelemetry('safety','Safety shield override active!');
       }
     } else if(d.type==='sim_episode_start'){
+      // Reset physics state so beaker snaps to bench immediately
+      SIM.grasped=false;
+      SIM.phase='approach';
+      SIM.beakerOnBench=true;
+      SIM.fluidInBeaker=250;
+      SIM.pouredFrac=0; SIM.spillFrac=0;
+      SIM.gripperOpenness=1.0;
+      SIM.beakerTiltDeg=0;
+      // Use reset positions if provided, else defaults
+      if(d.beaker_pos) SIM.beakerPos=d.beaker_pos;
+      if(d.glass_pos) SIM.glassPos=d.glass_pos;
+      if(d.joints) SIM.joints=d.joints;
+      // Detach beaker from gripper if it was attached
+      if(beakerAttached && linkMeshes['gripper_tip']){
+        linkMeshes['gripper_tip'].remove(srcBeakerGroup);
+        scene.add(srcBeakerGroup);
+        beakerAttached=false;
+      }
+      // Snap beaker to bench
+      if(SIM.beakerPos){
+        srcBeakerGroup.position.set(SIM.beakerPos[0], BENCH_H+0.02+0.045, SIM.beakerPos[1]);
+        srcBeakerGroup.quaternion.identity();
+      }
       addTelemetry('ep',`\u2501\u2501 Episode ${d.episode} started \u2501\u2501`);
     } else if(d.type==='sim_episode_end'){
       SIM.rewardHistory.push(d.total_reward);

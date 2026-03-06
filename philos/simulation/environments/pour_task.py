@@ -95,7 +95,7 @@ class PourTaskConfig(EnvConfig):
 
     # ── Lab geometry (metres, URDF world frame) ────────────
     # Robot pedestal at origin.  Bench is in FRONT of robot.
-    source_beaker_position: tuple[float, float, float] = (0.35, 0.10, 0.825)
+    source_beaker_position: tuple[float, float, float] = (0.35, 0.10, 0.815)
     target_glass_position: tuple[float, float, float] = (0.60, 0.35, 0.78)
     bench_height: float = 0.75
     beaker_radius: float = 0.035   # 70 mm diameter

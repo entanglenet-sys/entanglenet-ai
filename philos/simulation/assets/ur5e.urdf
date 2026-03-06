@@ -319,7 +319,7 @@
       </geometry>
       <origin xyz="0 0 0.020" rpy="0 0 0"/>
       <material name="gripper_dark">
-        <color rgba="0.12 0.12 0.15 1.0"/>
+        <color rgba="0.50 0.54 0.62 1.0"/>
       </material>
     </visual>
     <collision>
@@ -349,7 +349,7 @@
       </geometry>
       <origin xyz="0 0 0.004" rpy="0 0 0"/>
       <material name="gripper_mid">
-        <color rgba="0.20 0.20 0.24 1.0"/>
+        <color rgba="0.45 0.48 0.56 1.0"/>
       </material>
     </visual>
     <inertial>
@@ -373,7 +373,7 @@
       </geometry>
       <origin xyz="0 0 0.030" rpy="0 0 0"/>
       <material name="finger_grey">
-        <color rgba="0.30 0.30 0.35 1.0"/>
+        <color rgba="0.58 0.60 0.68 1.0"/>
       </material>
     </visual>
     <collision>
@@ -406,7 +406,7 @@
       </geometry>
       <origin xyz="0.005 0 0.009" rpy="0 0 0"/>
       <material name="pad_rubber">
-        <color rgba="0.08 0.08 0.10 1.0"/>
+        <color rgba="0.25 0.25 0.30 1.0"/>
       </material>
     </visual>
     <inertial>
@@ -430,7 +430,7 @@
       </geometry>
       <origin xyz="0 0 0.030" rpy="0 0 0"/>
       <material name="finger_grey">
-        <color rgba="0.30 0.30 0.35 1.0"/>
+        <color rgba="0.58 0.60 0.68 1.0"/>
       </material>
     </visual>
     <collision>
@@ -463,7 +463,7 @@
       </geometry>
       <origin xyz="-0.005 0 0.009" rpy="0 0 0"/>
       <material name="pad_rubber">
-        <color rgba="0.08 0.08 0.10 1.0"/>
+        <color rgba="0.25 0.25 0.30 1.0"/>
       </material>
     </visual>
     <inertial>
@@ -487,7 +487,7 @@
       </geometry>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <material name="tip_glow">
-        <color rgba="0.5 0.2 0.8 0.6"/>
+        <color rgba="0.7 0.3 1.0 0.9"/>
       </material>
     </visual>
     <inertial>
